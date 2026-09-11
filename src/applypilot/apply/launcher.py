@@ -25,6 +25,7 @@ from pathlib import Path
 
 
 from applypilot import config
+from applypilot.llm import _normalize_model_name, _infer_provider_from_model
 from applypilot.database import (
     get_connection,
     categorize_apply_result,
@@ -116,9 +117,6 @@ _stop_event = threading.Event()
 _claude_procs: dict[int, subprocess.Popen] = {}
 _claude_lock = threading.Lock()
 
-# Register cleanup on exit
-atexit.register(cleanup_on_exit)
-
 
 def _kill_all_children() -> None:
     """Kill all Claude subprocesses and mini-task procs."""
@@ -146,7 +144,6 @@ if platform.system() != "Windows":
     def _sigterm_handler(*_):
         _stop_event.set()
         _kill_all_children()
-        kill_all_chrome()
         sys.exit(0)
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
@@ -178,15 +175,15 @@ _mini_procs: dict[int, subprocess.Popen] = {}
 
 
 def _run_mini_task(worker_id: int, cdp_port: int, instructions: str) -> subprocess.Popen:
-    """Spawn a mini Claude Code session to execute user instructions in Chrome.
+    """Spawn a mini agent session (Hermes or Claude Code) to execute user instructions in Chrome.
 
-    The mini Claude has Playwright MCP access to the worker's Chrome window.
+    The mini agent has Playwright MCP access to the worker's Chrome window.
     It should complete the task and output TASK:COMPLETE when done.
 
     Args:
         worker_id: Worker whose Chrome window to use.
         cdp_port: CDP debug port for the worker's Chrome.
-        instructions: What the user wants Claude to do.
+        instructions: What the user wants the agent to do.
 
     Returns:
         Running subprocess.Popen handle (stdout is readable).
@@ -198,6 +195,35 @@ def _run_mini_task(worker_id: int, cdp_port: int, instructions: str) -> subproce
         f"Use the browser tools to complete this task. When finished, output TASK:COMPLETE.\n"
         f"Do NOT submit any job applications — only do what the user explicitly asked."
     )
+
+    backend = config.get_agent_backend()
+    if backend == "hermes":
+        hermes_bin = config.get_hermes_path() or "hermes"
+        mini_base = config.APP_DIR / f"hermes-mini-{worker_id}"
+        worker_hermes_dir = _write_hermes_worker_config(worker_id, cdp_port, base_dir=mini_base)
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(worker_hermes_dir)
+        proc = subprocess.Popen(
+            [
+                hermes_bin,
+                "chat",
+                "-q", prompt,
+                "--oneshot",
+                "--yolo",
+                "-Q",
+                "--source", "tool",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=str(config.APP_DIR),
+            start_new_session=True,
+        )
+        return proc
 
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
 
@@ -1348,6 +1374,56 @@ def _refresh_gmail_token() -> bool:
 # MCP config
 # ---------------------------------------------------------------------------
 
+def _get_gmail_mcp_config(backend: str = "hermes") -> dict:
+    """Return MCP server config for Gmail (IMAP or Google OAuth).
+
+    Prefers IMAP MCP server if an App Password is provided or if Google OAuth
+    keys are not set up. Falls back to @gongrzhe/server-gmail-autoauth-mcp
+    only when OAuth keys/tokens are explicitly present.
+    """
+    from applypilot.apply.imap_mcp import get_email_credentials
+    _, password = get_email_credentials()
+    oauth_creds = Path.home() / ".gmail-mcp" / "credentials.json"
+    oauth_keys = Path.home() / ".gmail-mcp" / "gcp-oauth.keys.json"
+
+    # If Google OAuth credentials exist and no IMAP password was set, use OAuth MCP
+    if not password and (oauth_creds.exists() or oauth_keys.exists()):
+        cfg = {
+            "command": "npx",
+            "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"],
+        }
+        if backend == "hermes":
+            cfg["tools"] = {
+                "exclude": [
+                    "draft_email", "modify_email", "delete_email",
+                    "download_attachment", "batch_modify_emails",
+                    "batch_delete_emails", "create_label", "update_label",
+                    "delete_label", "get_or_create_label",
+                    "list_email_labels", "create_filter", "list_filters",
+                    "get_filter", "delete_filter",
+                ],
+            }
+        return cfg
+
+    # Otherwise use Python stdio IMAP MCP server (standard for Hermes and Claude)
+    cfg = {
+        "command": sys.executable,
+        "args": ["-m", "applypilot.apply.imap_mcp"],
+    }
+    if backend == "hermes":
+        cfg["tools"] = {
+            "exclude": [
+                "draft_email", "modify_email", "delete_email",
+                "download_attachment", "batch_modify_emails",
+                "batch_delete_emails", "create_label", "update_label",
+                "delete_label", "get_or_create_label",
+                "list_email_labels", "create_filter", "list_filters",
+                "get_filter", "delete_filter",
+            ],
+        }
+    return cfg
+
+
 def _make_mcp_config(cdp_port: int, worker_id: int = 0) -> dict:
     """Build MCP config dict for a specific CDP port.
 
@@ -1376,14 +1452,109 @@ def _make_mcp_config(cdp_port: int, worker_id: int = 0) -> dict:
                     f"--user-agent={_get_real_user_agent()}",
                 ],
             },
-            "gmail": {
-                "command": "npx",
-                # Pinned: this package holds the Gmail OAuth tokens. 1.1.11
-                # verified byte-identical to the registry tarball 2026-06-10.
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"],
-            },
+            "gmail": _get_gmail_mcp_config(backend="claude"),
         }
     }
+
+
+def _write_hermes_worker_config(worker_id: int, cdp_port: int,
+                                model: str = "deepseek-flash",
+                                base_dir: Path | None = None,
+                                provider: str | None = None) -> Path:
+    """Write isolated Hermes config and credentials for a worker.
+
+    Hermes isolates per-instance state, tools, and configs via HERMES_HOME.
+    We configure Playwright MCP pointing to the worker's CDP port and
+    disable the internal browser toolset so there are no conflicting tool names.
+    """
+    import yaml
+    from applypilot.apply.chrome import _get_real_user_agent, get_worker_viewport
+    from applypilot.llm import _normalize_model_name, _infer_provider_from_model
+
+    if base_dir is None:
+        base_dir = config.APPLY_WORKER_DIR / f"worker-{worker_id}"
+    worker_hermes_dir = base_dir / ".hermes"
+    worker_hermes_dir.mkdir(parents=True, exist_ok=True)
+
+    norm_model = _normalize_model_name(model)
+    if not provider:
+        inferred = _infer_provider_from_model(norm_model)
+        if inferred in ("nvidia", "deepseek"):
+            provider = inferred
+        elif inferred in ("gemini", "google"):
+            provider = "google"
+        elif os.environ.get("NVIDIA_API_KEY") and not os.environ.get("DEEPSEEK_API_KEY"):
+            provider = "nvidia"
+        elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+            provider = "google"
+        else:
+            provider = "deepseek"
+
+    vp = get_worker_viewport(worker_id)
+    model_cfg: dict = {
+        "default": norm_model,
+        "provider": provider,
+    }
+    if provider == "nvidia":
+        model_cfg["base_url"] = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+    cfg = {
+        "model": model_cfg,
+        "agent": {
+            "disabled_toolsets": ["browser"],
+        },
+        "mcp_servers": {
+            "playwright": {
+                "command": "npx",
+                "args": [
+                    "@playwright/mcp@0.0.75",
+                    f"--cdp-endpoint=http://localhost:{cdp_port}",
+                    f"--viewport-size={vp[0]}x{vp[1]}",
+                    f"--user-agent={_get_real_user_agent()}",
+                ],
+                "tools": {
+                    "exclude": ["browser_install"],
+                },
+            },
+            "gmail": _get_gmail_mcp_config(backend="hermes"),
+        },
+    }
+
+    config_yaml_path = worker_hermes_dir / "config.yaml"
+    config_yaml_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+    # Copy credentials .env from user's ~/.hermes/.env or fallback to environment vars
+    user_hermes_env = Path.home() / ".hermes" / ".env"
+    dest_env = worker_hermes_dir / ".env"
+    env_content = ""
+    if user_hermes_env.exists():
+        env_content = user_hermes_env.read_text(encoding="utf-8")
+
+    nv_key = os.environ.get("NVIDIA_API_KEY", "")
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    google_key = os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+    if nv_key and "NVIDIA_API_KEY" not in env_content:
+        env_content += f"NVIDIA_API_KEY={nv_key}\n"
+    if ds_key and "DEEPSEEK_API_KEY" not in env_content:
+        env_content += f"DEEPSEEK_API_KEY={ds_key}\n"
+    if google_key and "GOOGLE_API_KEY" not in env_content:
+        env_content += f"GOOGLE_API_KEY={google_key}\n"
+    if google_key and "GEMINI_API_KEY" not in env_content:
+        env_content += f"GEMINI_API_KEY={google_key}\n"
+
+    dest_env.write_text(env_content, encoding="utf-8")
+
+    # Forward email credentials into worker .env if available
+    from applypilot.apply.imap_mcp import get_email_credentials
+    email_addr, email_pass = get_email_credentials()
+    if email_addr and "EMAIL_ADDRESS" not in env_content and "GMAIL_ADDRESS" not in env_content:
+        env_content += f"\nGMAIL_ADDRESS={email_addr}\nEMAIL_ADDRESS={email_addr}\n"
+    if email_pass and "GMAIL_APP_PASSWORD" not in env_content and "EMAIL_APP_PASSWORD" not in env_content:
+        env_content += f"\nGMAIL_APP_PASSWORD={email_pass}\nEMAIL_APP_PASSWORD={email_pass}\n"
+
+    dest_env.write_text(env_content, encoding="utf-8")
+
+    return worker_hermes_dir
 
 
 # ---------------------------------------------------------------------------
@@ -1499,18 +1670,52 @@ def acquire_job(target_url: str | None = None,
 
         if target_url:
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
-            row = conn.execute("""
+            existing = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path, company
+                       fit_score, location, full_description, cover_letter_path, company, apply_status
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
-                  AND tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 ORDER BY
                     CASE WHEN url = ? OR application_url = ? THEN 0 ELSE 1 END
                 LIMIT 1
             """, (target_url, target_url, like, like,
                   target_url, target_url)).fetchone()
+
+            if not existing:
+                from urllib.parse import urlparse
+                site = urlparse(target_url).netloc.replace("www.", "")
+                default_resume = str(config.RESUME_PDF_PATH) if config.RESUME_PDF_PATH.exists() else None
+                conn.execute("""
+                    INSERT OR IGNORE INTO jobs (url, title, site, application_url, discovered_at, tailored_resume_path, fit_score)
+                    VALUES (?, ?, ?, ?, datetime('now'), ?, 10)
+                """, (target_url, "Direct Application", site, target_url, default_resume))
+                conn.commit()
+                row = conn.execute("""
+                    SELECT url, title, site, application_url, tailored_resume_path,
+                           fit_score, location, full_description, cover_letter_path, company
+                    FROM jobs WHERE url = ?
+                """, (target_url,)).fetchone()
+            else:
+                row_dict = dict(existing)
+                updates = []
+                params = []
+                if not (row_dict.get("application_url") or "").strip():
+                    updates.append("application_url = ?")
+                    params.append(target_url)
+                if not row_dict.get("tailored_resume_path") and config.RESUME_PDF_PATH.exists():
+                    updates.append("tailored_resume_path = ?")
+                    params.append(str(config.RESUME_PDF_PATH))
+                if row_dict.get("apply_status") in ("manual", "in_progress", "failed"):
+                    updates.append("apply_status = NULL, apply_error = NULL, apply_category = NULL")
+                if updates:
+                    params.append(row_dict["url"])
+                    conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE url = ?", params)
+                    conn.commit()
+                row = conn.execute("""
+                    SELECT url, title, site, application_url, tailored_resume_path,
+                           fit_score, location, full_description, cover_letter_path, company
+                    FROM jobs WHERE url = ?
+                """, (row_dict["url"],)).fetchone()
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             site_filter = " AND ".join(f"site != '{s}'" for s in blocked_sites) if blocked_sites else "1=1"
@@ -1588,7 +1793,7 @@ def acquire_job(target_url: str | None = None,
             # Build in-flight buckets once, reuse for every candidate.
             # Use resolve_company_key so Greenhouse/Workday jobs (NULL company,
             # employer name in `site`) bucket correctly.
-            from applypilot.scoring.tailor import resolve_company_key
+            from applypilot.utils import resolve_company_key
             in_flight = get_in_flight_by_company(conn)
             now_utc = datetime.now(timezone.utc)
 
@@ -1677,7 +1882,7 @@ def acquire_job(target_url: str | None = None,
             return None
 
         apply_url = row["application_url"]
-        if is_manual_ats(apply_url):
+        if not target_url and is_manual_ats(apply_url):
             conn.execute(
                 "UPDATE jobs SET apply_status = 'manual', apply_error = 'manual ATS', "
                 "apply_category = 'manual_only' WHERE url = ?",
@@ -1733,6 +1938,11 @@ def mark_result(url: str, status: str, error: str | None = None,
                          reason="submission completed",
                          metadata={"duration_ms": duration_ms, "task_id": task_id},
                          force=True)
+        try:
+            from applypilot.database import export_applied_json
+            export_applied_json()
+        except Exception:
+            pass
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         category = categorize_apply_result(status, error)
@@ -1778,7 +1988,7 @@ def release_lock(url: str) -> None:
 
 def gen_prompt(target_url: str, min_score: int | None = None, max_score: int | None = None,
                model: str = "sonnet", worker_id: int = 0) -> Path | None:
-    """Generate a prompt file and print the Claude CLI command for manual debugging.
+    """Generate a prompt file and prepare agent configs for manual debugging.
 
     Returns:
         Path to the generated prompt file, or None if no job found.
@@ -1809,10 +2019,11 @@ def gen_prompt(target_url: str, min_score: int | None = None, max_score: int | N
     prompt_file = config.LOG_DIR / f"prompt_{site_slug}_{(job.get('title') or 'unknown')[:30].replace(' ', '_')}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
 
-    # Write MCP config for reference
+    # Write configs for reference
     port = BASE_CDP_PORT + worker_id
     mcp_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
     mcp_path.write_text(json.dumps(_make_mcp_config(port, worker_id=worker_id)), encoding="utf-8")
+    _write_hermes_worker_config(worker_id, port, model=model)
 
     return prompt_file
 
@@ -2057,49 +2268,92 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     # Refresh Gmail token before writing MCP config (the MCP server doesn't auto-refresh)
     _refresh_gmail_token()
 
-    # Write per-worker MCP config
-    mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_config_path.write_text(json.dumps(_make_mcp_config(port, worker_id=worker_id)), encoding="utf-8")
-
-    # Build claude command
-    cmd = [
-        "claude",
-        "--model", model,
-        "-p",
-        "--mcp-config", str(mcp_config_path),
-        "--strict-mcp-config",
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--disallowedTools", ",".join([
-            # browser_install restarts the browser in CDP mode, breaking the session
-            "mcp__playwright__browser_install",
-            # Block Gmail write tools (read-only access for email verification)
-            "mcp__gmail__draft_email", "mcp__gmail__modify_email",
-            "mcp__gmail__delete_email", "mcp__gmail__download_attachment",
-            "mcp__gmail__batch_modify_emails", "mcp__gmail__batch_delete_emails",
-            "mcp__gmail__create_label", "mcp__gmail__update_label",
-            "mcp__gmail__delete_label", "mcp__gmail__get_or_create_label",
-            "mcp__gmail__list_email_labels", "mcp__gmail__create_filter",
-            "mcp__gmail__list_filters", "mcp__gmail__get_filter",
-            "mcp__gmail__delete_filter",
-        ]),
-        "--output-format", "stream-json",
-        "--verbose", "-",
-    ]
-
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
-    # Remove ANTHROPIC_API_KEY so the subprocess uses the user's Max plan
-    # login instead of API billing. The key is loaded by config.load_env()
-    # for the Gemini/OpenAI LLM fallback chain but must NOT leak into the
-    # Claude Code subprocess — it would override interactive auth and hit
-    # "credit balance is too low" on an unfunded API account.
-    env.pop("ANTHROPIC_API_KEY", None)
-
-    # worker_dir was wiped+recreated above, before build_prompt populated it.
+    backend = config.get_agent_backend()
     worker_dir = config.APPLY_WORKER_DIR / f"worker-{worker_id}"
 
+    if backend == "hermes":
+        hermes_bin = config.get_hermes_path() or "hermes"
+        if model in ("sonnet", "haiku", "opus"):
+            env_model = os.environ.get("LLM_MODEL", "")
+            if env_model:
+                hermes_model = _normalize_model_name(env_model)
+            elif os.environ.get("NVIDIA_API_KEY"):
+                hermes_model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+            elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+                hermes_model = "gemini-3.6-flash"
+            else:
+                hermes_model = "deepseek-flash"
+        else:
+            hermes_model = _normalize_model_name(model)
+        worker_hermes_dir = _write_hermes_worker_config(worker_id, port, model=hermes_model)
+
+        prompt_file = worker_dir / f"prompt_w{worker_id}.txt"
+        prompt_file.write_text(agent_prompt, encoding="utf-8")
+
+        cmd = [
+            hermes_bin,
+            "chat",
+            "--query-file", str(prompt_file),
+            "--oneshot",
+            "--yolo",
+            "-Q",
+            "--source", "tool",
+        ]
+
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(worker_hermes_dir)
+    else:
+        # Write per-worker MCP config
+        mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
+        mcp_config_path.write_text(json.dumps(_make_mcp_config(port, worker_id=worker_id)), encoding="utf-8")
+
+        # Build claude command
+        cmd = [
+            "claude",
+            "--model", model,
+            "-p",
+            "--mcp-config", str(mcp_config_path),
+            "--strict-mcp-config",
+            "--permission-mode", "bypassPermissions",
+            "--no-session-persistence",
+            "--disallowedTools", ",".join([
+                # browser_install restarts the browser in CDP mode, breaking the session
+                "mcp__playwright__browser_install",
+                # Block Gmail write tools (read-only access for email verification)
+                "mcp__gmail__draft_email", "mcp__gmail__modify_email",
+                "mcp__gmail__delete_email", "mcp__gmail__download_attachment",
+                "mcp__gmail__batch_modify_emails", "mcp__gmail__batch_delete_emails",
+                "mcp__gmail__create_label", "mcp__gmail__update_label",
+                "mcp__gmail__delete_label", "mcp__gmail__get_or_create_label",
+                "mcp__gmail__list_email_labels", "mcp__gmail__create_filter",
+                "mcp__gmail__list_filters", "mcp__gmail__get_filter",
+                "mcp__gmail__delete_filter",
+            ]),
+            "--output-format", "stream-json",
+            "--verbose", "-",
+        ]
+
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        # Remove ANTHROPIC_API_KEY so the subprocess uses the user's Max plan
+        # login instead of API billing. The key is loaded by config.load_env()
+        # for the Gemini/OpenAI LLM fallback chain but must NOT leak into the
+        # Claude Code subprocess — it would override interactive auth and hit
+        # "credit balance is too low" on an unfunded API account.
+        env.pop("ANTHROPIC_API_KEY", None)
+
+    # Ensure email credentials are in environment for worker tools
+    from applypilot.apply.imap_mcp import get_email_credentials
+    _e_addr, _e_pass = get_email_credentials()
+    if _e_addr:
+        env["GMAIL_ADDRESS"] = _e_addr
+        env["EMAIL_ADDRESS"] = _e_addr
+    if _e_pass:
+        env["GMAIL_APP_PASSWORD"] = _e_pass
+        env["EMAIL_APP_PASSWORD"] = _e_pass
+
+    # worker_dir was wiped+recreated above, before build_prompt populated it.
     update_state(worker_id, status="applying", job_title=job["title"],
                  company=job.get("site", ""), score=job.get("fit_score", 0),
                  start_time=time.time(), actions=0, last_action="starting")
@@ -2122,7 +2376,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     try:
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.PIPE if backend == "claude" else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -2135,8 +2389,9 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         with _claude_lock:
             _claude_procs[worker_id] = proc
 
-        proc.stdin.write(agent_prompt)
-        proc.stdin.close()
+        if backend == "claude":
+            proc.stdin.write(agent_prompt)
+            proc.stdin.close()
 
         # Background thread: activate the agent's tab as soon as it navigates.
         # Playwright MCP creates a new tab rather than reusing the existing blank tab,
@@ -2266,6 +2521,20 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                 except json.JSONDecodeError:
                     text_parts.append(line)
                     lf.write(line + "\n")
+                    for tl in line.split("\n"):
+                        tl = tl.strip()
+                        if tl.startswith("SCREENING_Q:"):
+                            payload = tl[len("SCREENING_Q:"):].strip()
+                            parts = payload.split("|")
+                            if len(parts) >= 2:
+                                screening_qs.append({
+                                    "question": parts[0].strip(),
+                                    "field_type": parts[1].strip(),
+                                    "options": parts[2].strip() if len(parts) > 2 else "",
+                                })
+                    ws = get_state(worker_id)
+                    cur_actions = ws.actions if ws else 0
+                    update_state(worker_id, actions=cur_actions + 1, last_action=line[:35])
 
         proc.wait(timeout=300)
         returncode = proc.returncode
@@ -2284,8 +2553,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         duration_ms = int((time.time() - start) * 1000)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
+        prefix = "hermes" if backend == "hermes" else "claude"
+        job_log = config.LOG_DIR / f"{prefix}_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
         job_log.write_text(output, encoding="utf-8")
+        if backend == "hermes":
+            legacy_job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
+            legacy_job_log.write_text(output, encoding="utf-8")
 
         if stats:
             cost = stats.get("cost_usd", 0)
@@ -2293,13 +2566,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             prev_cost = ws.total_cost if ws else 0.0
             update_state(worker_id, total_cost=prev_cost + cost)
 
-        # Detect Claude Code credit exhaustion — stop the entire worker
-        if "credit balance is too low" in output.lower() or "insufficient credits" in output.lower():
-            add_event(f"[W{worker_id}] CREDIT EXHAUSTED — Claude Code credits depleted")
+        # Detect credit exhaustion — stop the entire worker
+        if any(err in output.lower() for err in ("credit balance is too low", "insufficient credits", "insufficient balance", "quota exceeded")):
+            agent_label = "Hermes / LLM" if backend == "hermes" else "Claude Code"
+            add_event(f"[W{worker_id}] CREDIT EXHAUSTED — {agent_label} credits depleted")
             update_state(worker_id, status="credits_exhausted",
                          last_action="NO CREDITS")
-            logger.error("Claude Code credits exhausted. Cannot auto-apply. "
-                         "Top up at https://console.anthropic.com/settings/billing")
+            logger.error(f"{agent_label} credits exhausted. Cannot auto-apply.")
             return "failed:credits_exhausted", duration_ms, []
 
         # Parse ACCOUNT_CREATED lines and save to DB
@@ -2425,6 +2698,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc.pid)
+        if dry_run:
+            try:
+                from applypilot.apply.chrome import release_dry_run_gate
+                release_dry_run_gate(port)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

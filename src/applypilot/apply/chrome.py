@@ -58,10 +58,12 @@ def _get_or_create_extension_key() -> str:
 
 _DRY_RUN_GATE_JS = r"""
 (function() {
+  window.__ap_dry_run_active = true;
   if (window.__ap_dry_run_gate_installed) return;
   window.__ap_dry_run_gate_installed = true;
-  // Block form submits outright.
+  // Block form submits outright while active.
   document.addEventListener('submit', e => {
+    if (!window.__ap_dry_run_active) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     try { console.log('[ApplyPilot] dry-run: form submit blocked', e.target); } catch (_) {}
@@ -73,6 +75,7 @@ _DRY_RUN_GATE_JS = r"""
   const SUBMIT_RE =
     /\b(submit application|submit my application|submit and apply|submit$|apply now|send application|finish application|complete application|complete and submit)\b/i;
   document.addEventListener('click', e => {
+    if (!window.__ap_dry_run_active) return;
     let t = e.target;
     if (!t) return;
     if (t.nodeType !== 1) t = t.parentElement;
@@ -96,6 +99,21 @@ _DRY_RUN_GATE_JS = r"""
       try { console.log('[ApplyPilot] dry-run: submit click blocked:', text); } catch (_) {}
     }
   }, true);
+})();
+"""
+
+_RELEASE_GATE_JS = r"""
+(function() {
+  window.__ap_dry_run_active = false;
+  try {
+    document.querySelectorAll('*').forEach(el => {
+      if (el.title && el.title.includes('ApplyPilot dry-run')) {
+        el.title = '';
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+      }
+    });
+  } catch (_) {}
 })();
 """
 
@@ -189,6 +207,84 @@ def inject_dry_run_gate(cdp_port: int) -> bool:
                 _send(ws, "Target.detachFromTarget", {"sessionId": sid})
         logger.info("Installed dry-run submit-blocker on %d page target(s)", installed)
         return installed > 0
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def release_dry_run_gate(cdp_port: int) -> bool:
+    """Deactivate the dry-run JS gate so the user can manually click Submit.
+
+    Called when the apply agent finishes running with --dry-run. Sets
+    `window.__ap_dry_run_active = false` and removes disabled outlines
+    from submit buttons across all active pages.
+    """
+    import urllib.request
+    import websocket  # type: ignore
+
+    try:
+        info = json.loads(urllib.request.urlopen(
+            f"http://localhost:{cdp_port}/json/version", timeout=3,
+        ).read())
+        browser_ws = info.get("webSocketDebuggerUrl")
+        if not browser_ws:
+            return False
+    except Exception:
+        logger.debug("release_dry_run_gate: could not fetch CDP /json/version", exc_info=True)
+        return False
+
+    msg_id = [0]
+
+    def _send(ws, method, params=None, session_id=None):
+        msg_id[0] += 1
+        req = {"id": msg_id[0], "method": method}
+        if params is not None:
+            req["params"] = params
+        if session_id is not None:
+            req["sessionId"] = session_id
+        ws.send(json.dumps(req))
+        for _ in range(40):
+            raw = ws.recv()
+            try:
+                resp = json.loads(raw)
+            except Exception:
+                continue
+            if resp.get("id") == msg_id[0]:
+                return resp
+        return None
+
+    try:
+        ws = websocket.create_connection(browser_ws, timeout=5)
+    except Exception:
+        logger.debug("release_dry_run_gate: ws connect failed", exc_info=True)
+        return False
+
+    try:
+        targets_resp = _send(ws, "Target.getTargets") or {}
+        page_targets = [
+            t for t in (targets_resp.get("result", {}).get("targetInfos", []) or [])
+            if t.get("type") == "page"
+        ]
+        released = 0
+        for tgt in page_targets:
+            attach = _send(ws, "Target.attachToTarget",
+                           {"targetId": tgt["targetId"], "flatten": True})
+            if not attach:
+                continue
+            sid = attach.get("result", {}).get("sessionId")
+            if not sid:
+                continue
+            try:
+                _send(ws, "Runtime.evaluate",
+                      {"expression": _RELEASE_GATE_JS, "awaitPromise": False},
+                      session_id=sid)
+                released += 1
+            finally:
+                _send(ws, "Target.detachFromTarget", {"sessionId": sid})
+        logger.info("Released dry-run submit gate on %d page target(s)", released)
+        return released > 0
     finally:
         try:
             ws.close()
@@ -456,35 +552,8 @@ def _kill_process_tree(pid: int) -> None:
 
 
 def _kill_on_port(port: int) -> None:
-    """Kill any process listening on a specific port (zombie cleanup).
-
-    Uses netstat on Windows, lsof on macOS/Linux.
-    """
-    try:
-        if platform.system() == "Windows":
-            result = subprocess.run(
-                ["netstat", "-ano", "-p", "TCP"],
-                capture_output=True, text=True, timeout=10,
-            )
-            for line in result.stdout.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
-                    pid = line.strip().split()[-1]
-                    if pid.isdigit():
-                        _kill_process_tree(int(pid))
-        else:
-            # macOS / Linux
-            result = subprocess.run(
-                ["lsof", "-ti", f":{port}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            for pid_str in result.stdout.strip().splitlines():
-                pid_str = pid_str.strip()
-                if pid_str.isdigit():
-                    _kill_process_tree(int(pid_str))
-    except FileNotFoundError:
-        logger.debug("Port-kill tool not found (netstat/lsof) for port %d", port)
-    except Exception:
-        logger.debug("Failed to kill process on port %d", port, exc_info=True)
+    """No-op: closing Chrome functionality has been removed; Chrome remains open."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -1255,28 +1324,39 @@ def bring_to_foreground_pid(pid: int) -> None:
 def _find_chrome_pid_for_port(port: int) -> int | None:
     """Find the PID of a Chrome/Chromium process listening on the given CDP port.
 
-    Scans /proc/*/cmdline (Linux only). Returns None on non-Linux or if not found.
+    Scans /proc/*/cmdline on Linux, or uses lsof on macOS/Unix.
     """
     target = f"--remote-debugging-port={port}"
-    for path in _glob.glob("/proc/*/cmdline"):
+    if platform.system() == "Linux":
+        for path in _glob.glob("/proc/*/cmdline"):
+            try:
+                with open(path, "rb") as fh:
+                    cmdline = fh.read().decode("utf-8", errors="replace").replace("\x00", " ")
+                if target in cmdline and ("chrome" in cmdline or "chromium" in cmdline):
+                    return int(path.split("/")[2])
+            except (OSError, ValueError, IndexError):
+                pass
+    else:
         try:
-            with open(path, "rb") as fh:
-                cmdline = fh.read().decode("utf-8", errors="replace").replace("\x00", " ")
-            if target in cmdline and ("chrome" in cmdline or "chromium" in cmdline):
-                return int(path.split("/")[2])
-        except (OSError, ValueError, IndexError):
+            res = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=3,
+            )
+            for pid_str in res.stdout.strip().splitlines():
+                pid_str = pid_str.strip()
+                if pid_str.isdigit():
+                    return int(pid_str)
+        except Exception:
             pass
     return None
 
 
-def probe_existing_chrome(port: int, expected_profile_dir: Path) -> int | None:
+def probe_existing_chrome(port: int, expected_profile_dir: Path | None = None) -> int | None:
     """Check if a usable Chrome instance is already running on the given CDP port.
 
-    Verifies the instance belongs to the expected worker profile by inspecting
-    the process cmdline. Only works on Linux (requires /proc filesystem).
-
     Returns:
-        Chrome PID if a verified Chrome is running on this port, None otherwise.
+        Chrome PID (or 0 if PID cannot be resolved) if Chrome CDP is alive on this port,
+        None otherwise.
     """
     # Step 1: Does CDP respond?
     try:
@@ -1284,28 +1364,26 @@ def probe_existing_chrome(port: int, expected_profile_dir: Path) -> int | None:
     except Exception:
         return None  # Nothing (or wrong thing) on this port
 
-    # Step 2: Find the Chrome PID via /proc cmdline scan
+    # Step 2: Find the Chrome PID
     pid = _find_chrome_pid_for_port(port)
-    if pid is None:
-        logger.debug("Chrome detected on port %d but PID not found in /proc", port)
-        return None
+    if pid is not None:
+        if expected_profile_dir is not None and platform.system() == "Linux":
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode("utf-8", errors="replace")
+                if str(expected_profile_dir) not in cmdline:
+                    logger.debug(
+                        "Chrome on port %d (pid %d) uses a different profile — not ours",
+                        port, pid,
+                    )
+                    return None
+            except OSError:
+                return None
+        logger.info("Verified existing Chrome on port %d (pid %d)", port, pid)
+        return pid
 
-    # Step 3: Verify it's using our expected profile directory
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            cmdline = fh.read().decode("utf-8", errors="replace")
-        if str(expected_profile_dir) not in cmdline:
-            logger.debug(
-                "Chrome on port %d (pid %d) uses a different profile — not ours",
-                port, pid,
-            )
-            return None
-    except OSError:
-        # /proc entry disappeared — process exited between steps
-        return None
-
-    logger.info("Verified existing Chrome on port %d (pid %d)", port, pid)
-    return pid
+    logger.info("Verified responsive Chrome CDP on port %d", port)
+    return 0
 
 
 def launch_chrome(worker_id: int, port: int | None = None,
@@ -1315,6 +1393,8 @@ def launch_chrome(worker_id: int, port: int | None = None,
                   ats_slug: str | None = None,
                   total_workers: int = 1) -> subprocess.Popen:
     """Launch a Chrome instance with remote debugging for a worker.
+
+    If Chrome is already running on this port, adopts and reuses it without killing.
 
     Args:
         worker_id: Numeric worker identifier.
@@ -1336,11 +1416,18 @@ def launch_chrome(worker_id: int, port: int | None = None,
     if port is None:
         port = BASE_CDP_PORT + worker_id
 
+    # Check if a live Chrome session is already running on this port
+    existing_pid = probe_existing_chrome(port)
+    if existing_pid is not None:
+        logger.info("[worker-%d] Chrome already running on port %d (pid %s) — reusing session",
+                    worker_id, port, existing_pid)
+        proc = _AdoptedChromeProcess(existing_pid)
+        with _chrome_lock:
+            _chrome_procs[worker_id] = proc
+        return proc
+
     profile_dir = setup_worker_profile(worker_id, refresh_cookies=refresh_cookies,
                                        ats_slug=ats_slug)
-
-    # Kill any zombie Chrome from a previous run on this port
-    _kill_on_port(port)
 
     # Remove stale singleton locks (left from copied/crashed profiles)
     _remove_singleton_locks(profile_dir)
@@ -1449,43 +1536,37 @@ def launch_chrome(worker_id: int, port: int | None = None,
     return proc
 
 
-def cleanup_worker(worker_id: int, process: subprocess.Popen | None) -> None:
-    """Kill a worker's Chrome instance and remove it from tracking.
+_keep_browser: bool = True
+
+
+def set_keep_browser(keep: bool) -> None:
+    """Configure whether Chrome should remain open after jobs complete (always True)."""
+    global _keep_browser
+    _keep_browser = True
+
+
+def get_keep_browser() -> bool:
+    """Return whether Chrome is configured to stay open (always True)."""
+    return True
+
+
+def cleanup_worker(worker_id: int, process: subprocess.Popen | None = None) -> None:
+    """Leave a worker's Chrome instance open and remove it from internal tracking.
 
     Args:
         worker_id: Numeric worker identifier.
-        process: The Popen handle (or _AdoptedChromeProcess) from launch_chrome.
+        process: Optional process handle (unused; Chrome is never killed).
     """
-    if process and process.poll() is None:
-        if process.pid:
-            _kill_process_tree(process.pid)
-        else:
-            # Adopted process with unknown PID — fall back to port-based kill
-            _kill_on_port(BASE_CDP_PORT + worker_id)
+    logger.info("[worker-%d] Leaving Chrome open permanently", worker_id)
     with _chrome_lock:
         _chrome_procs.pop(worker_id, None)
-    logger.info("[worker-%d] Chrome cleaned up", worker_id)
 
 
-def kill_all_chrome() -> None:
-    """Kill all Chrome instances and any port zombies.
-
-    Called during graceful shutdown to ensure no orphan Chrome processes.
-    """
+def kill_all_chrome(force: bool = False) -> None:
+    """No-op: Chrome closing functionality has been removed; Chrome stays open."""
+    logger.info("Leaving Chrome open permanently")
     with _chrome_lock:
-        procs = dict(_chrome_procs)
         _chrome_procs.clear()
-
-    for wid, proc in procs.items():
-        if proc.poll() is None:
-            if proc.pid:
-                _kill_process_tree(proc.pid)
-            else:
-                _kill_on_port(BASE_CDP_PORT + wid)
-        _kill_on_port(BASE_CDP_PORT + wid)
-
-    # Sweep base port in case of zombies
-    _kill_on_port(BASE_CDP_PORT)
 
 
 def reset_worker_dir(worker_id: int) -> Path:
@@ -1508,18 +1589,5 @@ def reset_worker_dir(worker_id: int) -> Path:
 
 
 def cleanup_on_exit() -> None:
-    """Atexit handler: kill all Chrome processes and sweep CDP ports.
-
-    Register this with atexit.register() at application startup.
-    """
-    with _chrome_lock:
-        procs = dict(_chrome_procs)
-        _chrome_procs.clear()
-
-    for wid, proc in procs.items():
-        if proc.poll() is None:
-            _kill_process_tree(proc.pid)
-        _kill_on_port(BASE_CDP_PORT + wid)
-
-    # Sweep base port for any orphan
-    _kill_on_port(BASE_CDP_PORT)
+    """No-op: Chrome closing functionality has been removed; Chrome stays open."""
+    pass

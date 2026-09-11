@@ -1237,7 +1237,7 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     now = datetime.now(timezone.utc).isoformat()
     counts = {"new": 0, "existing": 0}
 
-    from applypilot.discovery.url_normalize import canonicalize_application_url
+    from applypilot.url_normalize import canonicalize_application_url
 
     def _do_inserts() -> None:
         counts["new"] = 0
@@ -1658,6 +1658,55 @@ def get_applied_jobs(conn: sqlite3.Connection | None = None) -> list[dict]:
     return []
 
 
+def export_applied_json(target_path: Path | str | None = None) -> list[dict]:
+    """Export all applied jobs to applied.json with url and date_applied.
+
+    Writes to target_path if given, otherwise writes to both:
+    1. Workspace root / current working directory (applied.json)
+    2. User data directory (~/.applypilot/applied.json)
+
+    Returns the list of exported records.
+    """
+    applied = get_applied_jobs()
+    records = []
+    for j in applied:
+        raw_date = j.get("applied_at") or ""
+        date_str = raw_date
+        if raw_date and "T" in raw_date:
+            try:
+                date_str = raw_date[:19].replace("T", " ") + " UTC"
+            except Exception:
+                pass
+
+        records.append({
+            "url": j.get("url") or j.get("application_url"),
+            "date_applied": date_str,
+            "title": j.get("title") or "Direct Application",
+            "company": j.get("company") or j.get("site") or "Unknown",
+        })
+
+    json_str = json.dumps(records, indent=2, ensure_ascii=False)
+
+    paths_to_write: list[Path] = []
+    if target_path:
+        paths_to_write.append(Path(target_path))
+    else:
+        # 1. Workspace / current directory
+        paths_to_write.append(Path.cwd() / "applied.json")
+        # 2. Global app directory
+        from applypilot.config import APP_DIR
+        paths_to_write.append(APP_DIR / "applied.json")
+
+    for p in paths_to_write:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json_str, encoding="utf-8")
+        except Exception as e:
+            _log.warning("Could not write applied.json to %s: %s", p, e)
+
+    return records
+
+
 def get_in_flight_by_company(conn: sqlite3.Connection | None = None,
                              max_window_days: int = 365) -> dict[str, list[str]]:
     """Return ``{company_key: [timestamp_iso, ...]}`` for in-flight jobs.
@@ -1681,8 +1730,7 @@ def get_in_flight_by_company(conn: sqlite3.Connection | None = None,
     if conn is None:
         conn = get_connection()
 
-    # Lazy import to avoid a circular cycle (tailor → database).
-    from applypilot.scoring.tailor import resolve_company_key
+    from applypilot.utils import resolve_company_key
 
     rows = conn.execute("""
         SELECT company, site, strategy, application_url, url,
@@ -1702,280 +1750,7 @@ def get_in_flight_by_company(conn: sqlite3.Connection | None = None,
     return dict(out)
 
 
-def create_stub_job(email: dict, classification: str,
-                    conn: sqlite3.Connection | None = None) -> str:
-    """Create a minimal job entry from an unmatched application email.
 
-    Used for manually applied jobs that aren't in the pipeline DB.
-    The URL is synthesized as 'manual://{sender_domain}/{hash}'.
-
-    Key strategy:
-    - When a company name can be extracted from the subject or snippet,
-      key on (domain_root, company_normalized) so all emails about the same
-      company via the same ATS share one stub (Honor via Greenhouse,
-      Honor re-confirmation, Honor security code, etc.).
-    - Fall back to (sender:subject) when no company is extractable — keeps
-      per-subject uniqueness for generic subjects like "We received your application".
-
-    Args:
-        email: Normalized email dict with sender, subject, snippet, date, etc.
-        classification: The email classification (confirmation, rejection, etc.)
-
-    Returns:
-        The generated job URL (primary key).
-    """
-    import hashlib
-    from applypilot.tracking.matcher import (
-        extract_company_from_subject,
-        _extract_company_from_snippet,
-        normalize_company,
-    )
-
-    if conn is None:
-        conn = get_connection()
-
-    sender = email.get("sender", "")
-    domain = sender.split("@")[-1] if "@" in sender else "unknown"
-    domain_root = ".".join(domain.split(".")[-2:]) if "." in domain else domain
-
-    subject = email.get("subject", "")
-    snippet = email.get("snippet", "")
-
-    # Try to extract a real company name from subject then snippet
-    extracted_company = (
-        extract_company_from_subject(subject)
-        or _extract_company_from_snippet(snippet)
-    )
-
-    if extracted_company:
-        # Key on (domain_root, company_normalized) — all emails for the same
-        # company from the same ATS relay collapse to one stub
-        company = extracted_company
-        key = f"{domain_root}:{normalize_company(extracted_company)}"
-    else:
-        # Fallback: unique per sender+subject (safe for generic subjects)
-        company = ""  # Unknown — don't use ATS domain name as company (would attract all emails from that ATS)
-        key = f"{sender}:{subject}"
-
-    url_hash = hashlib.md5(key.encode()).hexdigest()[:12]
-    url = f"manual://{domain}/{url_hash}"
-
-    # Check if already exists
-    existing = conn.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone()
-    if existing:
-        return url
-
-    # Infer a title from the subject line
-    title = subject
-    for prefix in ("Thank you for your application to ",
-                   "Thank you for applying to ",
-                   "Thank you for your interest in ",
-                   "Your application to ",
-                   "Application received: ",
-                   "Re: "):
-        if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):]
-            break
-
-    now = datetime.now(timezone.utc).isoformat()
-    email_date = email.get("date", now)
-
-    conn.execute(
-        "INSERT INTO jobs (url, title, company, site, applied_at, apply_status, "
-        "                  discovered_at, tracking_status, tracking_updated_at, "
-        "                  detail_error, detail_error_category) "
-        "VALUES (?, ?, ?, 'manual', ?, 'applied', ?, ?, ?, "
-        "        'manual:// stub — not a real job listing', 'permanent')",
-        (url, title.strip() or extracted_company or "Unknown Position",
-         company, email_date, now, classification, now),
-    )
-    commit_with_retry(conn)
-    return url
-
-
-def email_already_tracked(email_id: str, conn: sqlite3.Connection | None = None) -> bool:
-    """Check if a Gmail message ID already exists in tracking_emails."""
-    if conn is None:
-        conn = get_connection()
-    row = conn.execute(
-        "SELECT 1 FROM tracking_emails WHERE email_id = ?", (email_id,)
-    ).fetchone()
-    return row is not None
-
-
-def store_tracking_email(email: dict, conn: sqlite3.Connection | None = None) -> None:
-    """Insert a classified email into tracking_emails.
-
-    Args:
-        email: Dict with keys matching tracking_emails columns.
-    """
-    if conn is None:
-        conn = get_connection()
-    conn.execute(
-        "INSERT OR IGNORE INTO tracking_emails "
-        "(email_id, thread_id, job_url, sender, sender_name, subject, "
-        " received_at, snippet, body_text, classification, extracted_data, classified_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            email["email_id"], email.get("thread_id"), email["job_url"],
-            email.get("sender"), email.get("sender_name"), email.get("subject"),
-            email.get("received_at"), email.get("snippet"),
-            email.get("body_text", "")[:10000],
-            email.get("classification"), email.get("extracted_data"),
-            email.get("classified_at"),
-        ),
-    )
-    commit_with_retry(conn)
-
-
-def store_tracking_person(person: dict, conn: sqlite3.Connection | None = None) -> None:
-    """Insert a contact person into tracking_people (ignore duplicates)."""
-    if conn is None:
-        conn = get_connection()
-    conn.execute(
-        "INSERT OR IGNORE INTO tracking_people "
-        "(job_url, name, title, email, source_email_id, first_seen_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            person["job_url"], person.get("name"), person.get("title"),
-            person.get("email"), person.get("source_email_id"),
-            person.get("first_seen_at"),
-        ),
-    )
-    commit_with_retry(conn)
-
-
-_TRACKING_PRIORITY = {
-    "ghosted": 1, "rejection": 2, "confirmation": 3,
-    "follow_up": 4, "interview": 5, "offer": 6,
-}
-
-# Maps tracking_status (the email-derived classification) to the canonical
-# state-machine state that should be set on the same job. Used by
-# update_tracking_status to keep `state` in sync with `tracking_status`
-# (decision #31 P0.5 leak (a) — was bypassing transition_state).
-_TRACKING_TO_STATE = {
-    "ghosted":      "ghosted",
-    "rejection":    "rejected",
-    "confirmation": "responded",
-    "follow_up":    "responded",
-    "interview":    "interview",
-    "offer":        "offer",
-}
-
-
-def update_tracking_status(job_url: str, new_status: str,
-                           conn: sqlite3.Connection | None = None) -> bool:
-    """Update a job's tracking_status if the new status has higher priority.
-
-    Returns True if the status was updated. Also threads the change through
-    `transition_state` so the canonical `state` column stays in sync — fixes
-    P0.5 leak (a) from CLAUDE.md decision #31.
-    """
-    if conn is None:
-        conn = get_connection()
-    row = conn.execute(
-        "SELECT tracking_status FROM jobs WHERE url = ?", (job_url,)
-    ).fetchone()
-    if row is None:
-        return False
-
-    current = row["tracking_status"]
-    current_pri = _TRACKING_PRIORITY.get(current, 0)
-    new_pri = _TRACKING_PRIORITY.get(new_status, 0)
-
-    if new_pri > current_pri:
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE jobs SET tracking_status = ?, tracking_updated_at = ? WHERE url = ?",
-            (new_status, now, job_url),
-        )
-        commit_with_retry(conn)
-        # Also emit a state-machine transition so the canonical `state`
-        # column matches. transition_state validates against
-        # VALID_TRANSITIONS — if the job isn't in a state that legally
-        # moves to the target (e.g. still "applying"), the call returns
-        # False and `tracking_status` is left as-is. We don't propagate
-        # the failure since email-driven updates are advisory.
-        target_state = _TRACKING_TO_STATE.get(new_status)
-        if target_state:
-            try:
-                transition_state(
-                    conn, job_url, target_state,
-                    reason=f"tracking:{new_status}",
-                )
-            except (ValueError, sqlite3.OperationalError):
-                pass
-        return True
-    return False
-
-
-def update_job_tracking_fields(job_url: str, fields: dict,
-                               conn: sqlite3.Connection | None = None) -> None:
-    """Update arbitrary tracking fields on a job row."""
-    if conn is None:
-        conn = get_connection()
-    if not fields:
-        return
-    set_clauses = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [job_url]
-    conn.execute(f"UPDATE jobs SET {set_clauses} WHERE url = ?", values)
-    commit_with_retry(conn)
-
-
-def get_tracking_emails(job_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Get all tracking emails for a job, ordered by received_at."""
-    if conn is None:
-        conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM tracking_emails WHERE job_url = ? ORDER BY received_at ASC",
-        (job_url,),
-    ).fetchall()
-    if rows:
-        columns = rows[0].keys()
-        return [dict(zip(columns, row)) for row in rows]
-    return []
-
-
-def get_tracking_people(job_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Get all tracking contacts for a job."""
-    if conn is None:
-        conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM tracking_people WHERE job_url = ? ORDER BY first_seen_at ASC",
-        (job_url,),
-    ).fetchall()
-    if rows:
-        columns = rows[0].keys()
-        return [dict(zip(columns, row)) for row in rows]
-    return []
-
-
-def get_action_items(conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Get all jobs with pending action items, sorted by deadline."""
-    if conn is None:
-        conn = get_connection()
-    rows = conn.execute(
-        "SELECT url, title, company, tracking_status, next_action, next_action_due "
-        "FROM jobs WHERE next_action IS NOT NULL "
-        "ORDER BY CASE WHEN next_action_due IS NULL THEN 1 ELSE 0 END, next_action_due ASC"
-    ).fetchall()
-    if rows:
-        columns = rows[0].keys()
-        return [dict(zip(columns, row)) for row in rows]
-    return []
-
-
-def get_tracking_stats(conn: sqlite3.Connection | None = None) -> dict:
-    """Return tracking status counts for the dashboard."""
-    if conn is None:
-        conn = get_connection()
-    rows = conn.execute(
-        "SELECT tracking_status, COUNT(*) as cnt FROM jobs "
-        "WHERE tracking_status IS NOT NULL "
-        "GROUP BY tracking_status ORDER BY cnt DESC"
-    ).fetchall()
-    return {row["tracking_status"]: row["cnt"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

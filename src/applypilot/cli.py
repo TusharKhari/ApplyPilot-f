@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -20,14 +22,11 @@ logging.basicConfig(
 
 app = typer.Typer(
     name="applypilot",
-    help="AI-powered end-to-end job application pipeline.",
+    help="Autonomous job application and form filling tool.",
     no_args_is_help=True,
 )
 console = Console()
 log = logging.getLogger(__name__)
-
-# Valid pipeline stages (in execution order)
-VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -63,125 +62,13 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """ApplyPilot — AI-powered end-to-end job application pipeline."""
-
-
-@app.command()
-def init() -> None:
-    """Run the first-time setup wizard (profile, resume, search config)."""
-    from applypilot.wizard.init import run_wizard
-
-    run_wizard()
-
-
-@app.command()
-def run(
-    stages: Optional[list[str]] = typer.Argument(
-        None,
-        help=(
-            "Pipeline stages to run. "
-            f"Valid: {', '.join(VALID_STAGES)}, all. "
-            "Defaults to 'all' if omitted."
-        ),
-    ),
-    min_score: int = typer.Option(
-        config.DEFAULTS["min_score"], "--min-score",
-        help=f"Minimum fit score for tailor/cover stages (default: {config.DEFAULTS['min_score']}).",
-    ),
-    max_age_days: int = typer.Option(
-        config.DEFAULTS["max_job_age_days"], "--max-age-days",
-        help=(
-            "Skip jobs whose discovered_at is older than this many days. "
-            "0 = no age filter. "
-            f"Default: {config.DEFAULTS['max_job_age_days']}."
-        ),
-    ),
-    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max jobs per stage (tailor/cover). Default: 20."),
-    workers: int = typer.Option(
-        1, "--workers", "-w",
-        help="Parallel threads for Workday/smart-extract stages. (JobSpy runs sequentially regardless.)",
-    ),
-    stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
-    doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
-    source: Optional[list[str]] = typer.Option(
-        None, "--source", "-s",
-        help="Discovery source(s) to run. Repeatable: --source hn --source jobspy. "
-             "Aliases: hn=hackernews, smart=smartextract. Only affects the discover stage.",
-    ),
-    list_sources: bool = typer.Option(
-        False, "--list-sources",
-        help="List available discovery sources and exit.",
-    ),
-) -> None:
-    """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
-    # Handle --list-sources before bootstrap (no DB/env needed)
-    if list_sources:
-        from applypilot.pipeline import DISCOVERY_SOURCES, _SOURCE_ALIASES
-        console.print("\n[bold]Available discovery sources:[/bold]\n")
-        for name, desc in DISCOVERY_SOURCES.items():
-            aliases = [a for a, canon in _SOURCE_ALIASES.items() if canon == name]
-            alias_str = f"  (alias: {', '.join(aliases)})" if aliases else ""
-            console.print(f"  [cyan]{name:<14s}[/cyan] {desc}{alias_str}")
-        console.print("\nUsage: applypilot run discover --source hn --source jobspy")
-        raise typer.Exit()
-
-    _bootstrap()
-
-    from applypilot.pipeline import run_pipeline, resolve_source_names
-
-    stage_list = stages if stages else ["all"]
-
-    # Validate stage names
-    for s in stage_list:
-        if s != "all" and s not in VALID_STAGES:
-            console.print(
-                f"[red]Unknown stage:[/red] '{s}'. "
-                f"Valid stages: {', '.join(VALID_STAGES)}, all"
-            )
-            raise typer.Exit(code=1)
-
-    # Resolve --source aliases
-    resolved_sources: list[str] | None = None
-    if source:
-        try:
-            resolved_sources = resolve_source_names(source)
-        except ValueError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(code=1)
-
-    # Validate --doc-format
-    from applypilot.scoring.pdf import VALID_DOC_FORMATS
-    if doc_format not in VALID_DOC_FORMATS:
-        console.print(f"[red]Invalid --doc-format:[/red] '{doc_format}'. Must be one of: {', '.join(VALID_DOC_FORMATS)}")
-        raise typer.Exit(code=1)
-
-    # Gate AI stages behind Tier 2
-    llm_stages = {"score", "tailor", "cover"}
-    if any(s in stage_list for s in llm_stages) or "all" in stage_list:
-        from applypilot.config import check_tier
-        check_tier(2, "AI scoring/tailoring")
-
-    result = run_pipeline(
-        stages=stage_list,
-        min_score=min_score,
-        max_age_days=max_age_days,
-        limit=limit,
-        dry_run=dry_run,
-        stream=stream,
-        workers=workers,
-        sources=resolved_sources,
-        doc_format=doc_format,
-    )
-
-    if result.get("errors"):
-        raise typer.Exit(code=1)
+    """ApplyPilot — Autonomous job application and form filling."""
 
 
 @app.command()
 def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
-    workers: int = typer.Option(5, "--workers", "-w", help="Number of parallel browser workers."),
+    workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers (default: 1)."),
     min_score: int = typer.Option(
         config.DEFAULTS["min_score"], "--min-score",
         help=f"Minimum fit score for job selection (default: {config.DEFAULTS['min_score']}).",
@@ -195,7 +82,8 @@ def apply(
         ),
     ),
     max_score: Optional[int] = typer.Option(None, "--max-score", help="Maximum fit score for job selection (useful for testing on lower-score jobs)."),
-    model: str = typer.Option("sonnet", "--model", "-m", help="Claude model name (sonnet | haiku | opus)."),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Autonomous agent backend: hermes (default if installed) or claude."),
+    model: str = typer.Option("sonnet", "--model", "-m", help="Agent model name (nvidia/nemotron-3.5-lightning-30b-a3b, moonshotai/kimi-k3, or deepseek-flash for Hermes, sonnet for Claude)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
@@ -212,6 +100,7 @@ def apply(
     reset_category: Optional[str] = typer.Option(None, "--reset-category", help="Reset all jobs in a category for retry (e.g., blocked_technical)."),
     sessions: bool = typer.Option(False, "--sessions", help="List saved ATS sessions."),
     clear_session: Optional[str] = typer.Option(None, "--clear-session", help="Clear a saved ATS session (e.g., workday)."),
+    keep_browser: bool = typer.Option(True, "--keep-browser", help="Keep Chrome open after submitting/filling (always True; Chrome remains open).", hidden=True),
 ) -> None:
     """Launch auto-apply to submit job applications."""
     _bootstrap()
@@ -273,7 +162,7 @@ def apply(
     # --- Full apply mode ---
 
     # Validate --doc-format
-    from applypilot.scoring.pdf import VALID_DOC_FORMATS as _valid_fmts
+    from applypilot.config import VALID_DOC_FORMATS as _valid_fmts
     if doc_format not in _valid_fmts:
         console.print(f"[red]Invalid --doc-format:[/red] '{doc_format}'. Must be one of: {', '.join(_valid_fmts)}")
         raise typer.Exit(code=1)
@@ -282,8 +171,30 @@ def apply(
     from applypilot.apply.launcher import set_doc_format
     set_doc_format(doc_format)
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
+    from applypilot.apply.chrome import set_keep_browser
+    set_keep_browser(keep_browser)
+
+    if agent:
+        os.environ["APPLYPILOT_AGENT"] = agent.lower()
+
+    # Check 1: Tier 3 required (Hermes Agent | Claude Code CLI + Chrome)
     check_tier(3, "auto-apply")
+
+    from applypilot import config as _cfg
+    backend = _cfg.get_agent_backend()
+    if backend == "hermes" and model == "sonnet":
+        env_model = os.environ.get("LLM_MODEL", "")
+        if env_model:
+            from applypilot.llm import _normalize_model_name
+            model = _normalize_model_name(env_model)
+        elif os.environ.get("DEEPSEEK_API_KEY"):
+            model = "deepseek-flash"
+        elif os.environ.get("NVIDIA_API_KEY"):
+            model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+        elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+            model = "gemini-3.6-flash"
+        else:
+            model = "deepseek-flash"
 
     # Check 2: Profile exists
     if not _profile_path.exists():
@@ -293,8 +204,8 @@ def apply(
         )
         raise typer.Exit(code=1)
 
-    # Check 3: Tailored resumes exist (skip for --gen with --url)
-    if not (gen and url):
+    # Check 3: Tailored resumes exist (skip if --url is provided)
+    if not url:
         conn = get_connection()
         ready = conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
@@ -316,24 +227,35 @@ def apply(
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
         console.print("\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
-        )
+        if backend == "hermes":
+            hermes_bin = _cfg.get_hermes_path() or "hermes"
+            worker_hermes = _profile_path.parent / "apply-workers" / "worker-0" / ".hermes"
+            console.print(
+                f"  HERMES_HOME={worker_hermes} {hermes_bin} chat --query-file {prompt_file} --oneshot --yolo"
+            )
+        else:
+            mcp_path = _profile_path.parent / ".mcp-apply-0.json"
+            console.print(
+                f"  claude --model {model} -p "
+                f"--mcp-config {mcp_path} "
+                f"--permission-mode bypassPermissions < {prompt_file}"
+            )
         return
 
     from applypilot.apply.launcher import main as apply_main
 
-    effective_limit = limit if limit is not None else 0
+    if url:
+        workers = 1
+        continuous = False
+    effective_limit = limit if limit is not None else (1 if url else (0 if continuous else 1))
 
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
+    console.print(f"  Agent:    {backend.capitalize()}")
+    console.print(f"  Model:    {model}")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if fresh_sessions:
@@ -356,6 +278,7 @@ def apply(
         fresh_sessions=fresh_sessions,
         no_hitl=no_hitl,
         no_focus=no_focus,
+        keep_browser=keep_browser,
     )
 
 
@@ -591,81 +514,35 @@ def status() -> None:
             state_table.add_row(f"[{color}]{st}[/{color}]", str(n))
         console.print(state_table)
 
-    console.print()
-
-
 @app.command()
-def track(
-    days: int = typer.Option(14, "--days", "-d", help="Email look-back period in days."),
-    setup: bool = typer.Option(False, "--setup", help="Verify Gmail MCP connectivity."),
-    actions: bool = typer.Option(False, "--actions", "-a", help="Show pending action items."),
-    ghosted_days: int = typer.Option(7, "--ghosted-days", help="Days before marking as ghosted."),
-    limit: int = typer.Option(100, "--limit", "-l", help="Max emails to fetch."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch + classify but don't write DB/files."),
-    relabel: bool = typer.Option(False, "--relabel", help="Apply 'ap-track' label to all emails already in the DB (backfill)."),
-    remap_stubs: bool = typer.Option(False, "--remap-stubs", help="Re-match emails under multi-company stubs to correct per-company jobs."),
+def applied(
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Custom output path for applied.json."),
 ) -> None:
-    """Track application responses from Gmail."""
+    """View all applied applications and save them to applied.json."""
     _bootstrap()
 
-    from applypilot.config import check_tier
-    check_tier(2, "application tracking")
+    from applypilot.database import export_applied_json
 
-    if setup:
-        import asyncio
-        from applypilot.tracking.gmail_client import check_gmail_setup, verify_connection
-
-        ok, msg = check_gmail_setup()
-        if not ok:
-            console.print(f"[red]{msg}[/red]")
-            raise typer.Exit(code=1)
-
-        console.print("[dim]Testing Gmail MCP connection...[/dim]")
-        connected = asyncio.run(verify_connection())
-        if connected:
-            console.print("[green]Gmail MCP connected successfully.[/green]")
-        else:
-            console.print("[red]Gmail MCP connection failed.[/red]")
-            console.print("[dim]Check that gcp-oauth.keys.json is valid and OAuth is authorized.[/dim]")
-            raise typer.Exit(code=1)
+    records = export_applied_json(target_path=output)
+    if not records:
+        console.print("[yellow]No applied applications found in database.[/yellow]")
         return
 
-    if actions:
-        from applypilot.tracking import show_action_items
-        show_action_items()
-        return
+    table = Table(title="Applied Applications", show_header=True, header_style="bold green")
+    table.add_column("Company / Title", style="bold")
+    table.add_column("Date Applied", style="cyan")
+    table.add_column("URL", style="dim")
 
-    if relabel:
-        from applypilot.tracking import relabel_all_tracked
-        relabel_all_tracked()
-        return
+    for r in records:
+        comp_title = f"{r.get('company', 'Unknown')}: {r.get('title', 'Direct Application')}"
+        table.add_row(comp_title, r.get("date_applied", ""), r.get("url", ""))
 
-    if remap_stubs:
-        from applypilot.tracking import remap_stubs as _remap_stubs
-        _remap_stubs()
-        return
-
-    from applypilot.tracking import run_tracking
-
-    result = run_tracking(
-        days=days,
-        ghosted_days=ghosted_days,
-        limit=limit,
-        dry_run=dry_run,
-    )
-
-    if result.get("errors", 0) > 0:
-        raise typer.Exit(code=1)
+    console.print()
+    console.print(table)
+    console.print(f"\n[green]Saved {len(records)} applied job(s) to [bold]applied.json[/bold][/green]\n")
 
 
-@app.command()
-def dashboard() -> None:
-    """Generate and open the HTML dashboard in your browser."""
-    _bootstrap()
 
-    from applypilot.view import open_dashboard
-
-    open_dashboard()
 
 
 # `applypilot human-review` was deleted in plan 5 of the apply UX overhaul.
@@ -947,7 +824,6 @@ def creds_import_logs(
     """
     _bootstrap()
 
-    import os
     from applypilot.database import mine_accounts_from_logs, upsert_account, get_all_accounts
 
     if log_dir is None:

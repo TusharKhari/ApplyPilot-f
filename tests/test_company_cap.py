@@ -84,7 +84,7 @@ def test_in_flight_uses_same_key_as_acquire_job(tmp_db, seed_job):
     look up the in-flight count, otherwise lookups miss and the cap
     quietly fails open."""
     from applypilot.database import get_in_flight_by_company
-    from applypilot.scoring.tailor import resolve_company_key
+    from applypilot.utils import resolve_company_key
     conn = tmp_db()
     job_kwargs = dict(
         company=None, site="Temporal Technologies", strategy="greenhouse_api",

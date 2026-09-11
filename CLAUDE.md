@@ -50,17 +50,20 @@ When a stage fails: stop, read logs, find root cause, fix code, re-run.
 - **Tier 3** (Auto-Apply): Claude Code CLI as subprocess. Fills forms via Playwright.
 
 ### Two Credit Systems (IMPORTANT)
-- **Tier 2**: Gemini API (free tier) + OpenAI fallback. Keys in `~/.applypilot/.env`
-- **Tier 3**: Claude Code CLI with Max plan. IMPORTANT: `ANTHROPIC_API_KEY` must be stripped from subprocess env (launcher.py does this) or it overrides Max plan auth with API billing. No Gemini browser agent exists — the Gemini/OpenAI cascade is Tier 2 only. `--strict-mcp-config` is required to prevent Docker MCP's Playwright (which can't access host files) from interfering with resume uploads.
+- **Tier 2**: Gemini API (free tier) + NVIDIA NIM + DeepSeek + OpenAI fallback. Keys in `~/.applypilot/.env`
+- **Tier 3**: Claude Code CLI with Max plan or Hermes Agent with NVIDIA NIM / DeepSeek. IMPORTANT: `ANTHROPIC_API_KEY` must be stripped from subprocess env (launcher.py does this) or it overrides Max plan auth with API billing. No Gemini browser agent exists — the Gemini/NVIDIA/DeepSeek/OpenAI cascade is Tier 2 only. `--strict-mcp-config` is required to prevent Docker MCP's Playwright (which can't access host files) from interfering with resume uploads.
 
 ### LLM Client (`src/applypilot/llm.py`)
 
 Multi-provider fallback with two-tier model strategy:
-- **Fast** (scoring, HN extraction): Gemini Flash → OpenAI → Anthropic Haiku
-- **Quality** (tailoring, cover letters): Gemini Pro → OpenAI → Anthropic Sonnet
+- **Fast** (scoring, HN extraction): Gemini Flash → NVIDIA NIM (Kimi-K3) → DeepSeek Flash (DeepSeek-V4.1-Flash) → OpenAI → Anthropic Haiku
+- **Quality** (tailoring, cover letters): Gemini Pro → NVIDIA NIM (Kimi-K3) → DeepSeek Flash/Chat → OpenAI → Anthropic Sonnet
 
 Key behaviors:
 - `get_client(quality=False)` for fast, `get_client(quality=True)` for quality
+- `NVIDIA_API_KEY` supported as primary provider (`LLM_PROVIDER=nvidia` or `LLM_MODEL=kimi-k3` / `moonshotai/kimi-k3`) or in fallback chain
+- `DEEPSEEK_API_KEY` supported as provider (`LLM_PROVIDER=deepseek` or `LLM_MODEL=deepseek-flash` / `DeepSeek-V4.1-Flash`) or in fallback chain
+- Model alias normalization: `kimi-k3` maps to `moonshotai/kimi-k3`; `DeepSeek-V4.1-Flash` maps to `deepseek-flash`
 - On 429: marks model exhausted for 5 min, falls to next in chain
 - `config.load_env()` MUST be called before importing `llm` (env vars read at module import)
 - Gemini 2.5+ thinking tokens consume max_tokens budget — set much higher than visible output needs

@@ -16,10 +16,9 @@ RESUME_PDF_PATH = APP_DIR / "resume.pdf"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
 ENV_PATH = APP_DIR / ".env"
 
-# Generated output
-TAILORED_DIR = APP_DIR / "tailored_resumes"
-COVER_LETTER_DIR = APP_DIR / "cover_letters"
-TRACKING_DIR = APP_DIR / "tracking"
+VALID_DOC_FORMATS = ("pdf", "docx")
+
+# Generated output and logs
 LOG_DIR = APP_DIR / "logs"
 
 # Chrome worker isolation
@@ -104,7 +103,7 @@ def get_chrome_user_data() -> Path:
 
 def ensure_dirs():
     """Create all required directories."""
-    for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, TRACKING_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, SESSIONS_DIR, FILES_DIR]:
+    for d in [APP_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, SESSIONS_DIR, FILES_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -228,27 +227,67 @@ TIER_COMMANDS: dict[int, list[str]] = {
 }
 
 
+def get_hermes_path() -> str | None:
+    """Find Hermes Agent executable path if installed.
+
+    Checks:
+      1. HERMES_PATH environment variable
+      2. PATH search via shutil.which("hermes")
+      3. User local bin: ~/.local/bin/hermes
+    """
+    env_path = os.environ.get("HERMES_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+
+    found = shutil.which("hermes")
+    if found:
+        return found
+
+    local_bin = Path.home() / ".local" / "bin" / "hermes"
+    if local_bin.exists() and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+
+    return None
+
+
+def get_agent_backend() -> str:
+    """Return the active autonomous agent backend ('hermes' or 'claude').
+
+    Can be forced via APPLYPILOT_AGENT environment variable.
+    Defaults to 'hermes' if Hermes Agent is installed, else 'claude'.
+    """
+    forced = os.environ.get("APPLYPILOT_AGENT", "").strip().lower()
+    if forced in ("hermes", "claude"):
+        return forced
+
+    if get_hermes_path() is not None:
+        return "hermes"
+
+    return "claude"
+
+
 def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + (Hermes Agent | Claude Code CLI) + Chrome
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
+    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "NVIDIA_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL"))
     if not has_llm:
         return 1
 
     has_claude = shutil.which("claude") is not None
+    has_hermes = get_hermes_path() is not None
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if (has_hermes or has_claude) and has_chrome:
         return 3
 
     return 2
@@ -269,11 +308,15 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
+    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "NVIDIA_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")):
+        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY / NVIDIA_API_KEY / DEEPSEEK_API_KEY")
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        has_agent = (get_hermes_path() is not None) or (shutil.which("claude") is not None)
+        if not has_agent:
+            missing.append(
+                "Autonomous Agent CLI — install Hermes Agent (free: [bold]https://github.com/nousresearch/hermes-agent[/bold]) "
+                "or Claude Code CLI ([bold]https://claude.ai/code[/bold])"
+            )
         try:
             get_chrome_path()
         except FileNotFoundError:

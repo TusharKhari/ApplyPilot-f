@@ -397,6 +397,7 @@ class TestBringToForegroundPid(unittest.TestCase):
     def test_calls_x11_when_xdotool_missing(self):
         """Falls through xdotool (not found) to _raise_x11_window."""
         with (
+            patch("platform.system", return_value="Linux"),
             patch("subprocess.run") as mock_run,
             patch("applypilot.apply.chrome._raise_x11_window", return_value=True) as mock_x11,
         ):
@@ -410,6 +411,7 @@ class TestBringToForegroundPid(unittest.TestCase):
     def test_skips_x11_when_xdotool_succeeds(self):
         """Does NOT call _raise_x11_window when xdotool succeeds."""
         with (
+            patch("platform.system", return_value="Linux"),
             patch("subprocess.run") as mock_run,
             patch("applypilot.apply.chrome._raise_x11_window") as mock_x11,
         ):

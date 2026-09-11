@@ -148,7 +148,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 model: str = "sonnet", dry_run: bool = False,
                 fresh_sessions: bool = False,
                 total_workers: int = 1,
-                no_hitl: bool = False) -> tuple[int, int]:
+                no_hitl: bool = False,
+                keep_browser: bool = True) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -175,7 +176,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
     applied = 0
     failed = 0
-    continuous = limit == 0
+    continuous = limit == 0 and not target_url
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
@@ -187,6 +188,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             worker_id, limit, target_url, min_score, max_score, max_age_days,
             headless, model, dry_run, fresh_sessions, applied, failed, continuous,
             jobs_done, empty_polls, port, total_workers, no_hitl=no_hitl,
+            keep_browser=keep_browser,
         )
     finally:
         _stop_worker_listener(worker_id)
@@ -200,6 +202,7 @@ def _worker_loop_body(
     applied: int, failed: int, continuous: bool,
     jobs_done: int, empty_polls: int, port: int,
     total_workers: int = 1, no_hitl: bool = False,
+    keep_browser: bool = True,
 ) -> tuple[int, int]:
     """Main per-worker processing loop."""
     from applypilot.apply.launcher import (
@@ -519,8 +522,7 @@ def _worker_loop_body(
             failed += 1
             update_state(worker_id, jobs_failed=failed)
         finally:
-            if chrome_proc:
-                cleanup_worker(worker_id, chrome_proc)
+            pass
 
         if was_skipped:
             continue
@@ -586,7 +588,7 @@ def main(limit: int = 1, target_url: str | None = None,
          dry_run: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1,
          fresh_sessions: bool = False, no_hitl: bool = False,
-         no_focus: bool = False) -> None:
+         no_focus: bool = False, keep_browser: bool = True) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -611,6 +613,10 @@ def main(limit: int = 1, target_url: str | None = None,
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
     _stop_event.clear()
+
+    if target_url:
+        workers = 1
+        continuous = False
 
     config.ensure_dirs()
     console = Console()
@@ -650,8 +656,8 @@ def main(limit: int = 1, target_url: str | None = None,
         effective_limit = 0
         mode_label = "continuous"
     else:
-        effective_limit = limit
-        mode_label = f"{limit} jobs"
+        effective_limit = limit if limit is not None and limit > 0 else (1 if target_url else 1)
+        mode_label = f"{effective_limit} job{'s' if effective_limit != 1 else ''}"
 
     # Initialize dashboard for all workers
     for i in range(workers):
@@ -683,7 +689,6 @@ def main(limit: int = 1, target_url: str | None = None,
                 for wid, cproc in list(_claude_procs.items()):
                     if cproc.poll() is None:
                         _kill_process_tree(cproc.pid)
-            kill_all_chrome()
             raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _sigint_handler)
@@ -734,6 +739,7 @@ def main(limit: int = 1, target_url: str | None = None,
                         fresh_sessions=fresh_sessions,
                         total_workers=workers,
                         no_hitl=no_hitl,
+                        keep_browser=keep_browser,
                     ): i
                     for i in range(workers)
                 }
@@ -802,5 +808,4 @@ def main(limit: int = 1, target_url: str | None = None,
     finally:
         _stop_event.set()
         stop_health_checks()
-        kill_all_chrome()
         restore_focus_mode(_prev_focus_mode)

@@ -44,18 +44,25 @@ def _build_profile_summary(profile: dict) -> str:
     # Address -- structured for form fields
     lines.append(f"Street Address: {personal.get('address', '')}")
     lines.append(f"City: {personal.get('city', '')}")
-    lines.append(f"State/Province: {personal.get('province_state', '')}")
+    lines.append(f"State/Province: {personal.get('province_state', '') or personal.get('state', '')}")
     lines.append(f"Postal Code: {personal.get('postal_code', '')}")
     lines.append(f"Country: {personal.get('country', '')}")
     # Full address (for single-line fields)
     addr_parts = [
         personal.get("address", ""),
         personal.get("city", ""),
-        personal.get("province_state", ""),
+        personal.get("province_state", "") or personal.get("state", ""),
         personal.get("postal_code", ""),
         personal.get("country", ""),
     ]
     lines.append(f"Full Address: {', '.join(p for p in addr_parts if p)}")
+
+    if personal.get("nationality"):
+        lines.append(f"Nationality: {personal['nationality']}")
+    if personal.get("place_of_birth"):
+        lines.append(f"Place of Birth: {personal['place_of_birth']}")
+    if personal.get("student_id"):
+        lines.append(f"Student ID / Matrikelnummer: {personal['student_id']}")
 
     if personal.get("linkedin_url"):
         lines.append(f"LinkedIn: {personal['linkedin_url']}")
@@ -69,22 +76,80 @@ def _build_profile_summary(profile: dict) -> str:
     # Work authorization
     lines.append(f"Work Auth: {work_auth.get('legally_authorized_to_work', 'See profile')}")
     lines.append(f"Sponsorship Needed: {work_auth.get('require_sponsorship', 'See profile')}")
-    if work_auth.get("work_permit_type"):
-        lines.append(f"Work Permit: {work_auth['work_permit_type']}")
+    if work_auth.get("work_permit_type") or work_auth.get("permit_type"):
+        lines.append(f"Work Permit: {work_auth.get('work_permit_type') or work_auth.get('permit_type')}")
+    if work_auth.get("card_valid_until"):
+        lines.append(f"Work Permit Valid Until: {work_auth['card_valid_until']}")
+    if work_auth.get("permitted_work_terms"):
+        lines.append(f"Permitted Work Terms: {work_auth['permitted_work_terms']}")
 
     # Compensation
-    currency = comp.get("salary_currency", "USD")
-    lines.append(f"Salary Expectation: ${comp['salary_expectation']} {currency}")
+    currency = comp.get("salary_currency", "EUR")
+    lines.append(f"Salary Expectation: {comp.get('salary_expectation', '')} {currency}")
+    if comp.get("salary_expectation_note"):
+        lines.append(f"Compensation Note: {comp['salary_expectation_note']}")
+    if comp.get("hourly_wage_werkstudent_eur"):
+        lines.append(f"Hourly Wage (Werkstudent): {comp['hourly_wage_werkstudent_eur']} EUR/hr")
 
     # Experience
-    if exp.get("years_of_experience_total"):
-        lines.append(f"Years Experience: {exp['years_of_experience_total']}")
-    if exp.get("current_job_title"):
-        lines.append(f"Most Recent Title: {exp['current_job_title']}")
-    if exp.get("target_role"):
-        lines.append(f"Target Role: {exp['target_role']}")
-    if exp.get("education_level"):
-        lines.append(f"Education: {exp['education_level']}")
+    if isinstance(exp, dict):
+        if exp.get("years_of_experience_total"):
+            lines.append(f"Years Experience: {exp['years_of_experience_total']}")
+        if exp.get("current_job_title") or exp.get("current_title"):
+            lines.append(f"Most Recent Title: {exp.get('current_job_title') or exp.get('current_title')}")
+        if exp.get("target_role"):
+            lines.append(f"Target Role: {exp['target_role']}")
+        if exp.get("education_level"):
+            lines.append(f"Education Level: {exp['education_level']}")
+        if exp.get("current_status"):
+            lines.append(f"Current Status: {exp['current_status']}")
+        work_history = exp.get("history", []) or p.get("work_experience", [])
+    elif isinstance(exp, list):
+        work_history = exp
+    else:
+        work_history = p.get("work_experience", [])
+
+    if work_history:
+        lines.append("Work History:")
+        for job_item in work_history:
+            title = job_item.get("title", "")
+            company = job_item.get("company", "")
+            loc = job_item.get("location", "")
+            start = job_item.get("start", "")
+            end = job_item.get("end", "Present")
+            lines.append(f"  - {title} at {company} ({start} - {end}, {loc})")
+            for ach in job_item.get("achievements", []):
+                lines.append(f"    * {ach}")
+
+    # Education details
+    education = p.get("education", [])
+    if isinstance(education, list) and education:
+        lines.append("Education Details:")
+        for edu in education:
+            inst = edu.get("institution", "")
+            deg = edu.get("degree_full") or edu.get("degree", "")
+            field = edu.get("field", "")
+            gpa = edu.get("gpa") or edu.get("cgpa", "")
+            start = edu.get("start_year", "")
+            end = edu.get("end_year") or "Present"
+            status = edu.get("current_status", "")
+            edu_desc = f"  - {deg} in {field}, {inst} ({start} - {end})"
+            if gpa:
+                edu_desc += f", Grade/GPA: {gpa}"
+            if status:
+                edu_desc += f" [{status}]"
+            lines.append(edu_desc)
+
+    # Key Projects
+    projects = p.get("projects", [])
+    if isinstance(projects, list) and projects:
+        lines.append("Key Projects:")
+        for proj in projects:
+            pname = proj.get("name", "")
+            techs = ", ".join(proj.get("technologies", []))
+            lines.append(f"  - {pname} ({techs}):")
+            for ach in proj.get("achievements", []):
+                lines.append(f"    * {ach}")
 
     # Certifications (from resume_facts)
     resume_facts = p.get("resume_facts", {})
@@ -109,7 +174,7 @@ def _build_profile_summary(profile: dict) -> str:
     languages = personal.get("languages", [])
     if languages:
         if isinstance(languages[0], dict):
-            lang_parts = [f"{lang['language']} ({lang['proficiency']})" for lang in languages]
+            lang_parts = [f"{lang['language']} ({lang.get('proficiency') or lang.get('level')})" for lang in languages]
             lines.append(f"Languages: {', '.join(lang_parts)}")
             # Also list just the language names for simple yes/no questions
             lines.append(f"Languages spoken: {', '.join(lang['language'] for lang in languages)}")
@@ -118,22 +183,44 @@ def _build_profile_summary(profile: dict) -> str:
             lines.append(f"Languages: {', '.join(languages)}")
 
     # Availability
-    lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
+    avail_date = avail.get("preferred_start_date") or avail.get("earliest_start_date", "Immediately")
+    lines.append(f"Available: {avail_date}")
+    if avail.get("weekly_availability_werkstudent_hours"):
+        lines.append(f"Weekly Availability (Werkstudent): {avail['weekly_availability_werkstudent_hours']} hours/week")
+    if avail.get("weekly_availability_internship_hours"):
+        lines.append(f"Weekly Availability (Internship): {avail['weekly_availability_internship_hours']} hours/week")
 
-    # Standard responses
-    lines.extend([
-        "Age 18+: Yes",
-        "Background Check: Yes",
-        "Felony: No",
-        "Previously Worked Here: No",
-        "How Heard: Online Job Board",
-    ])
+    # Standard / General Screening Responses
+    general_answers = p.get("general_answers", {})
+    if general_answers:
+        lines.append("General Screening Answers:")
+        for q_key, ans in general_answers.items():
+            readable_q = q_key.replace("_", " ").capitalize()
+            lines.append(f"  - {readable_q}: {ans}")
+    else:
+        lines.extend([
+            "Age 18+: Yes",
+            "Background Check: Yes",
+            "Felony: No",
+            "Previously Worked Here: No",
+            "How Heard: Online Job Board",
+        ])
+
+    # Company-specific answers
+    company_specific = p.get("company_specific", {})
+    if company_specific:
+        lines.append("Company-Specific Screening Answers:")
+        for company_name, c_answers in company_specific.items():
+            lines.append(f"  [{company_name}]:")
+            for c_key, c_val in c_answers.items():
+                readable_k = c_key.replace("_", " ")
+                lines.append(f"    * {readable_k}: {c_val}")
 
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
     lines.append(f"Sexual Orientation: {eeo.get('sexual_orientation', 'I do not wish to answer')}")
     lines.append(f"Transgender: {eeo.get('transgender', 'I do not wish to answer')}")
-    dob = eeo.get('date_of_birth', '')
+    dob = eeo.get('date_of_birth', '') or personal.get('date_of_birth', '')
     if dob:
         lines.append(f"Date of Birth: {dob}")
     lines.append(f"Race/Ethnicity: {eeo.get('race_ethnicity', 'Decline to self-identify')}")
@@ -577,7 +664,16 @@ def build_prompt(job: dict, tailored_resume: str,
 
     src_doc = Path(resume_path).with_suffix(doc_ext).resolve()
     if not src_doc.exists():
-        raise ValueError(f"Resume {doc_format.upper()} not found: {src_doc}")
+        alt_ext = ".pdf" if doc_ext == ".docx" else ".docx"
+        alt_doc = Path(resume_path).with_suffix(alt_ext).resolve()
+        if alt_doc.exists():
+            src_doc = alt_doc
+            doc_ext = alt_ext
+        elif Path(resume_path).exists():
+            src_doc = Path(resume_path).resolve()
+            doc_ext = src_doc.suffix
+        else:
+            raise ValueError(f"Resume {doc_format.upper()} not found: {src_doc}")
 
     # Copy to a clean filename for upload (recruiters see the filename)
     full_name = personal["full_name"]
@@ -883,6 +979,7 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
      - Do NOT confuse this with Google/Microsoft SSO — those are still blocked per 5a.
    5c. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
    5d. Check if the site matches a KNOWN CREDENTIAL below. If yes, use those credentials. Otherwise use default: {personal['email']} / {personal.get('password', '')}
+   UNIVERSAL PASSWORD RULE: When creating an account or registering on ANY site/ATS, ALWAYS use email "{personal['email']}" and password "{personal.get('password', '')}". Use this EXACT password for all accounts (do NOT generate random passwords or use different ones).
 {_build_site_credentials_section(site_credentials)}
    5d-WORKDAY. SPECIAL RULE — Workday (*.myworkdayjobs.com):
      Workday uses per-employer subdomains. Follow this exact flow:
@@ -968,13 +1065,8 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
 9. Answer screening questions using the rules above.
 10. {submit_instruction}
-11. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Then check for new tabs (browser_tabs action: "list"). Switch to newest, close old. Snapshot to confirm submission. Look for "thank you" or "application received".
-    CLEANUP (after confirming submission or any terminal result):
-    - browser_tabs action "list" — get all open tabs in this window.
-    - For each tab that is NOT the homepage (http://localhost:{server_port}/), close it:
-      browser_tabs action "close" with the tab index.
-    - browser_navigate to http://localhost:{server_port}/ — return to your worker homepage.
-    The homepage shows a log of what you've done this session.
+11. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Snapshot to confirm submission. Look for "thank you" or "application received".
+    - Keep Chrome and the application tab open so the user can verify the completed application. Do NOT close Chrome or close tabs.
 12. Output your result.
 
 == CRITICAL: YOU MUST OUTPUT A RESULT CODE ==

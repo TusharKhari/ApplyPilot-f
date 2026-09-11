@@ -112,6 +112,20 @@ def _infer_result_from_output(output: str) -> str | None:
 
     # Order matters — check most specific patterns first
     patterns: list[tuple[str, list[str]]] = [
+        ("api_rate_limit", [
+            "too many requests",
+            "http 429",
+            'status":429',
+            "rate limit",
+            "rate_limit",
+        ]),
+        ("api_error", [
+            "api call failed",
+            "authentication fails",
+            "invalid api key",
+            "unauthorized",
+            "http 401",
+        ]),
         ("login_issue", [
             "password reset requires email",
             "cannot log in",

@@ -18,7 +18,7 @@ canonical employer identifier regardless of how the row was discovered.
 
 from __future__ import annotations
 
-from applypilot.scoring.tailor import resolve_company_key
+from applypilot.utils import resolve_company_key
 
 
 # ── Greenhouse ───────────────────────────────────────────────────────────
