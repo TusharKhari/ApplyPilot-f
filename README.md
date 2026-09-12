@@ -4,7 +4,7 @@
 
 ApplyPilot automates the tedious part of job searching: opening job application forms, filling in personal details, work authorization, education, experience, answering complex screening questions with a persistent Q&A knowledge base, uploading resumes, and saving application records to `applied.json` and a local SQLite database.
 
----
+--- 
 
 ## Core Features
 
