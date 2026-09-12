@@ -635,6 +635,7 @@ def _build_qa_section(doc_format: str | None = None) -> str:
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False,
+                 stop_before_submit: bool = True,
                  worker_id: int = 0,
                  doc_format: str = "pdf") -> str:
     """Build the full instruction prompt for the apply agent.
@@ -648,6 +649,7 @@ def build_prompt(job: dict, tailored_resume: str,
         tailored_resume: Plain-text content of the tailored resume.
         cover_letter: Optional plain-text cover letter content.
         dry_run: If True, tell the agent not to click Submit.
+        stop_before_submit: If True, fill full form and stop before final submit.
 
     Returns:
         Complete prompt string for the AI agent.
@@ -783,11 +785,55 @@ def build_prompt(job: dict, tailored_resume: str,
             optional_files_lines.append(f"{label}: {resolved}")
     optional_files_block = "\n".join(optional_files_lines)
 
-    # Dry-run: override submit instruction
-    if dry_run:
-        submit_instruction = "IMPORTANT: Do NOT click the final Submit/Apply button. Review the form, verify all fields, then output RESULT:APPLIED with a note that this was a dry run."
+    # Stop-before-submit or dry-run: override submit instruction
+    should_stop = bool(stop_before_submit or dry_run)
+    if should_stop:
+        submit_instruction = (
+            "CRITICAL: STOP BEFORE APPLYING. DO NOT click the final Submit/Apply/Bewerbung absenden button under any circumstances.\n"
+            "Your job is to ONLY FILL THE FULL FORM completely and accurately:\n"
+            "   - Navigate through multi-page forms (click Next / Continue / Save and Continue) until you reach the FINAL review/submission page.\n"
+            "   - Fill every single field, dropdown, radio button, and checkbox (including GDPR/privacy consent).\n"
+            "   - Upload the tailored resume and cover letter and any required documents.\n"
+            "   - Take a final snapshot on the review page to verify all fields are filled.\n"
+            "   - STOP immediately right before clicking Submit. Leave Chrome open on this page.\n"
+            "   - Output RESULT:REVIEW_READY (or RESULT:REVIEW_READY:{{current_page_url}}) and stop. The human user will take the final step to submit."
+        )
+        post_submit_instruction = (
+            "Form filling complete! Keep Chrome and the application tab open on the final review page.\n"
+            "    - Do NOT look for a confirmation/thank-you page because you did NOT submit.\n"
+            "    - Confirm all fields are filled on the review page, then proceed to output your result."
+        )
+        mission_statement = (
+            "Your ONE mission: get this candidate an interview by accurately filling out the ENTIRE application form. "
+            "You have all information and tools. Fill all fields, navigate all pages up to the final review/submit step, but STOP BEFORE APPLYING. "
+            "The human user will review and take the final step to submit."
+        )
+        mission_goal = (
+            "Fill out the complete, accurate application up to the final review/submit page. "
+            "Do NOT click the final Submit/Apply button. Stop before submitting — the user will take the last step."
+        )
     else:
-        submit_instruction = "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. Only click Submit after confirming everything is correct."
+        submit_instruction = (
+            "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. "
+            "Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, "
+            "work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. "
+            "Only click Submit after confirming everything is correct."
+        )
+        post_submit_instruction = (
+            "After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. "
+            "If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). "
+            "Snapshot to confirm submission. Look for \"thank you\" or \"application received\".\n"
+            "    - Keep Chrome and the application tab open so the user can verify the completed application. Do NOT close Chrome or close tabs."
+        )
+        mission_statement = (
+            "Your ONE mission: get this candidate an interview. You have all the information and tools. "
+            "Think strategically. Act decisively. Submit the application."
+        )
+        mission_goal = (
+            "Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.\n\n"
+            "If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. "
+            "Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal."
+        )
 
     # Look up the per-ATS successful-path memo. If present, the prompt
     # gets a "PRIOR SUCCESSFUL PATH" section that summarizes the tool-call
@@ -800,7 +846,7 @@ def build_prompt(job: dict, tailored_resume: str,
     prior_path_block = format_path_for_prompt(load_path(_ats_slug)) if _ats_slug else None
     prior_path_section = (prior_path_block + "\n\n") if prior_path_block else ""
 
-    prompt = f"""You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. Submit the application.
+    prompt = f"""You are an autonomous job application agent. {mission_statement}
 
 IMPORTANT: You are running on a REAL computer with FULL filesystem access. You are NOT in a sandbox. You CAN read/write files, upload documents, and access the local filesystem. The resume and cover letter paths below are real files on disk — use them directly.
 
@@ -825,9 +871,7 @@ Cover Letter {doc_format.upper()} (upload if asked): {cl_upload_path or "N/A"}
 {profile_summary}
 
 {prior_path_section}== YOUR MISSION ==
-Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.
-
-If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal.
+{mission_goal}
 
 {hard_rules}
 
@@ -1065,14 +1109,15 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
 9. Answer screening questions using the rules above.
 10. {submit_instruction}
-11. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Snapshot to confirm submission. Look for "thank you" or "application received".
-    - Keep Chrome and the application tab open so the user can verify the completed application. Do NOT close Chrome or close tabs.
+11. {post_submit_instruction}
 12. Output your result.
 
 == CRITICAL: YOU MUST OUTPUT A RESULT CODE ==
-Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If you submitted the form, output RESULT:APPLIED. If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.
+Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If all fields are filled and form is on the final review page, output RESULT:REVIEW_READY (or RESULT:APPLIED if submitting). If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.
 
 == RESULT CODES (output EXACTLY one) ==
+RESULT:REVIEW_READY -- form is fully filled and ready on final review/submit page; user will review and take the final step to submit
+RESULT:REVIEW_READY:{{url}} -- form is fully filled and ready on final review/submit page at {{url}}
 RESULT:APPLIED -- submitted successfully
 RESULT:ALREADY_APPLIED -- job was already applied to previously; no re-submission possible
 RESULT:EXPIRED -- job closed or no longer accepting applications

@@ -151,6 +151,11 @@ if platform.system() != "Windows":
 # Each item: (worker_id, questions_list, answer_event)
 _qa_queue: queue.Queue = queue.Queue()
 
+# Review-ready interactive queue: worker threads post filled applications, main thread prompts user
+# Each item: (worker_id, job_dict, review_event)
+_review_queue: queue.Queue = queue.Queue()
+_review_decisions: dict[int, str] = {}
+
 # HITL state moved to apply/hitl.py and re-exported above:
 #   _waiting_workers, _waiting_lock, _hitl_servers, _hitl_server_lock,
 #   _stdin_fallback_lock, _action_log_cache, _action_log_cache_lock.
@@ -172,6 +177,93 @@ _handback_events: dict[int, threading.Event] = {}
 
 # Per-worker active mini-task Claude processes
 _mini_procs: dict[int, subprocess.Popen] = {}
+
+
+def trigger_takeover(worker_id: int = 0) -> bool:
+    """Trigger user takeover (pause) for a worker from terminal or API."""
+    tev = _takeover_events.get(worker_id)
+    if tev is None:
+        tev = threading.Event()
+        _takeover_events[worker_id] = tev
+    tev.set()
+
+    hbe = _handback_events.get(worker_id)
+    if hbe:
+        hbe.clear()
+
+    with _claude_lock:
+        cproc = _claude_procs.get(worker_id)
+    if cproc and cproc.poll() is None:
+        _kill_process_tree(cproc.pid)
+
+    mproc = _mini_procs.get(worker_id)
+    if mproc and mproc.poll() is None:
+        _kill_process_tree(mproc.pid)
+
+    with _worker_state_lock:
+        ws = _worker_state.get(worker_id)
+        if ws is None:
+            ws = {}
+            _worker_state[worker_id] = ws
+        ws["status"] = "paused_by_user"
+        cdp_port = BASE_CDP_PORT + worker_id
+        try:
+            from applypilot.apply.chrome import bring_to_foreground_cdp, bring_to_foreground_pid
+            bring_to_foreground_cdp(cdp_port)
+            bring_to_foreground_pid(ws.get("chrome_pid"))
+        except Exception:
+            pass
+    update_state(worker_id, status="paused_by_user", last_action="paused by user")
+    return True
+
+
+def trigger_handback(worker_id: int = 0, instructions: str | None = None, save: bool = False) -> bool:
+    """Resume agent after user takeover (play) from terminal or API."""
+    with _worker_state_lock:
+        ws = _worker_state.get(worker_id)
+        if ws is None:
+            ws = {}
+            _worker_state[worker_id] = ws
+        if save and instructions:
+            job = ws.get("job") or {}
+            site = job.get("site", "unknown")
+            reason = ws.get("reason") or "takeover"
+            try:
+                from applypilot.database import store_qa
+                store_qa(
+                    question=f"HITL:{site}:{reason}",
+                    answer=instructions,
+                    source="human",
+                    field_type="hitl_instruction",
+                )
+            except Exception:
+                pass
+        ws["handback_instructions"] = instructions.strip() if instructions else None
+        ws["status"] = "applying"
+
+    tev = _takeover_events.get(worker_id)
+    if tev:
+        tev.clear()
+    hbe = _handback_events.get(worker_id)
+    if hbe is None:
+        hbe = threading.Event()
+        _handback_events[worker_id] = hbe
+    hbe.set()
+    update_state(worker_id, status="applying", last_action="resuming after takeover")
+    return True
+
+
+def is_worker_paused(worker_id: int = 0) -> bool:
+    """Check if worker is currently in paused_by_user or waiting_human status."""
+    with _worker_state_lock:
+        ws = _worker_state.get(worker_id)
+        if ws and ws.get("status") in ("paused_by_user", "waiting_human"):
+            return True
+    from applypilot.apply.dashboard import get_state
+    state = get_state(worker_id)
+    if state and state.status in ("paused_by_user", "waiting_human"):
+        return True
+    return False
 
 
 def _run_mini_task(worker_id: int, cdp_port: int, instructions: str) -> subprocess.Popen:
@@ -587,13 +679,7 @@ def _start_worker_listener(worker_id: int, no_hitl: bool = False) -> int:
             self._text_ok()
 
         def _handle_takeover(self):
-            takeover_event.set()
-            # Kill the active Claude proc
-            with _claude_lock:
-                cproc = _claude_procs.get(worker_id)
-            if cproc and cproc.poll() is None:
-                _kill_process_tree(cproc.pid)
-            state["status"] = "paused_by_user"
+            trigger_takeover(worker_id)
             self._text_ok()
 
         def _handle_run_task(self):
@@ -658,27 +744,7 @@ def _start_worker_listener(worker_id: int, no_hitl: bool = False) -> int:
             body = self._read_body()
             instructions = body.get("instructions", "").strip()
             save = body.get("save", False)
-            if save and instructions:
-                job = state.get("job") or {}
-                site = job.get("site", "unknown")
-                reason = state.get("reason") or "takeover"
-                try:
-                    from applypilot.database import store_qa
-                    store_qa(
-                        question=f"HITL:{site}:{reason}",
-                        answer=instructions,
-                        source="human",
-                        field_type="hitl_instruction",
-                    )
-                    state["saved_instruction"] = instructions
-                except Exception as e:
-                    logger.debug("Failed to save HITL instruction to Q&A KB: %s", e)
-            state["handback_instructions"] = instructions or None
-            state["status"] = "applying"
-            # Clear takeover so next job doesn't see it
-            takeover_event.clear()
-            # Unblock worker_loop
-            handback_event.set()
+            trigger_handback(worker_id, instructions=instructions, save=save)
             self._text_ok()
 
         def _handle_done(self):
@@ -2180,6 +2246,7 @@ def _activate_agent_tab(port: int, timeout: float = 20.0) -> None:
 
 def run_job(job: dict, port: int, worker_id: int = 0,
             model: str = "sonnet", dry_run: bool = False,
+            stop_before_submit: bool = True,
             skip_tab_reset: bool = False,
             extra_context: str | None = None) -> tuple[str, int, list[dict]]:
     """Spawn a Claude Code session for one job application.
@@ -2190,6 +2257,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         worker_id: Numeric worker identifier.
         model: Claude model name.
         dry_run: If True, don't click Submit.
+        stop_before_submit: If True, fill full form and stop before final submit.
         skip_tab_reset: If True, don't close leftover tabs (used after HITL/takeover).
         extra_context: Optional instructions from a previous human takeover, prepended
             to the agent prompt so it knows what was done.
@@ -2198,6 +2266,14 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         Tuple of (status_string, duration_ms, screening_questions).
         screening_questions is a list of dicts with keys: question, field_type, options.
     """
+    # Clear any residual takeover and handback events for this worker
+    tev = _takeover_events.get(worker_id)
+    if tev:
+        tev.clear()
+    hbe = _handback_events.get(worker_id)
+    if hbe:
+        hbe.clear()
+
     # Close leftover tabs from previous job so agent starts on a blank page
     if not skip_tab_reset:
         _reset_browser_tabs(port)
@@ -2206,7 +2282,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     # submits and clicks on submit-style buttons. Belt to the prompt's
     # suspenders — even if the model ignores the prompt instruction
     # (Haiku has done this), the click never reaches a handler.
-    if dry_run:
+    should_stop = bool(stop_before_submit or dry_run)
+    if should_stop:
         try:
             from applypilot.apply.chrome import inject_dry_run_gate
             inject_dry_run_gate(port)
@@ -2233,6 +2310,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         job=job,
         tailored_resume=resume_text,
         dry_run=dry_run,
+        stop_before_submit=stop_before_submit,
         worker_id=worker_id,
         doc_format=_doc_format,
     )
@@ -2240,6 +2318,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     # When resuming after user takeover: inject a RESUME banner so Claude does NOT
     # follow step 1 (browser_navigate) and wipe whatever the user already filled in.
     if skip_tab_reset:
+        resume_target = (
+            "fields from the current page state, navigate to the final review page, and STOP before applying (do NOT click Submit).\n"
+            if should_stop
+            else "fields from the current page state and submit.\n"
+        )
         resume_header = (
             "== ⚠ RESUMING AFTER USER TAKEOVER ⚠ ==\n"
             "The browser already has the application form open. The user may have partially filled it.\n"
@@ -2247,7 +2330,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             "FORBIDDEN: browser_navigate — do NOT navigate to any URL. Do NOT load the job URL.\n"
             "SKIP steps 1, 1a, 3, and 4 in STEP-BY-STEP entirely.\n"
             "After the snapshot: check for a login wall (step 5), then continue filling remaining form\n"
-            "fields from the current page state and submit.\n"
+            f"{resume_target}"
             "== END RESUME ==\n\n"
         )
         if extra_context:
@@ -2586,8 +2669,50 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         def _clean_reason(s: str) -> str:
             return re.sub(r'[*`"]+$', '', s).strip()
 
+        # Check for RESULT:REVIEW_READY[:{url}]
+        if "RESULT:REVIEW_READY" in output or "RESULT:READY_TO_SUBMIT" in output:
+            rev_url = job.get("application_url") or job["url"]
+            for out_line in output.split("\n"):
+                if "RESULT:REVIEW_READY" in out_line:
+                    after = out_line.split("RESULT:REVIEW_READY", 1)[-1].lstrip(":").strip()
+                    after = _clean_reason(after)
+                    if after.startswith("http"):
+                        rev_url = after
+                    break
+                elif "RESULT:READY_TO_SUBMIT" in out_line:
+                    after = out_line.split("RESULT:READY_TO_SUBMIT", 1)[-1].lstrip(":").strip()
+                    after = _clean_reason(after)
+                    if after.startswith("http"):
+                        rev_url = after
+                    break
+            add_event(f"[W{worker_id}] REVIEW_READY ({elapsed}s): {(job.get('title') or '')[:30]}")
+            update_state(worker_id, status="review_ready",
+                         last_action=f"REVIEW_READY ({elapsed}s)")
+            if should_stop:
+                try:
+                    from applypilot.apply.chrome import release_dry_run_gate
+                    release_dry_run_gate(port)
+                except Exception:
+                    pass
+            return f"review_ready:{rev_url}", duration_ms, screening_qs
+
         for result_status in ["APPLIED", "ALREADY_APPLIED", "SUCCESS", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
             if f"RESULT:{result_status}" in output:
+                # If stop_before_submit or dry_run was active and status is APPLIED/SUCCESS:
+                # the agent completed the form up to the review page without submitting.
+                # Map to review_ready so the user takes the final step.
+                if should_stop and result_status in ("APPLIED", "SUCCESS"):
+                    rev_url = job.get("application_url") or job["url"]
+                    add_event(f"[W{worker_id}] REVIEW_READY ({elapsed}s): {(job.get('title') or '')[:30]}")
+                    update_state(worker_id, status="review_ready",
+                                 last_action=f"REVIEW_READY ({elapsed}s)")
+                    try:
+                        from applypilot.apply.chrome import release_dry_run_gate
+                        release_dry_run_gate(port)
+                    except Exception:
+                        pass
+                    return f"review_ready:{rev_url}", duration_ms, screening_qs
+
                 # Normalize SUCCESS/ALREADY_APPLIED -> applied (already applied counts as applied)
                 canonical = "applied" if result_status in ("SUCCESS", "ALREADY_APPLIED") else result_status.lower()
                 # Mark Q&A outcomes based on application result
@@ -2661,6 +2786,18 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         # No explicit RESULT line. Try to infer the outcome from agent output.
         inferred = _infer_result_from_output(output)
         if inferred in ("applied", "already_applied"):
+            if should_stop:
+                rev_url = job.get("application_url") or job["url"]
+                add_event(f"[W{worker_id}] REVIEW_READY ({elapsed}s): {(job.get('title') or '')[:30]}")
+                update_state(worker_id, status="review_ready",
+                             last_action=f"REVIEW_READY ({elapsed}s)")
+                try:
+                    from applypilot.apply.chrome import release_dry_run_gate
+                    release_dry_run_gate(port)
+                except Exception:
+                    pass
+                return f"review_ready:{rev_url}", duration_ms, screening_qs
+
             label = "ALREADY APPLIED" if inferred == "already_applied" else "APPLIED"
             add_event(f"[W{worker_id}] INFERRED {label} ({elapsed}s): {(job.get('title') or '')[:30]}")
             update_state(worker_id, status="applied",
@@ -2698,7 +2835,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc.pid)
-        if dry_run:
+        if should_stop:
             try:
                 from applypilot.apply.chrome import release_dry_run_gate
                 release_dry_run_gate(port)

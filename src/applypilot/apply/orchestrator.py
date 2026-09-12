@@ -51,6 +51,7 @@ from applypilot.apply.chrome import (
 )
 from applypilot.apply.dashboard import (
     add_event,
+    get_state,
     get_totals,
     init_worker,
     render_full,
@@ -146,6 +147,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 max_age_days: int | None = None,
                 headless: bool = False,
                 model: str = "sonnet", dry_run: bool = False,
+                stop_before_submit: bool = True,
                 fresh_sessions: bool = False,
                 total_workers: int = 1,
                 no_hitl: bool = False,
@@ -162,6 +164,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         headless: Run Chrome headless.
         model: Claude model name.
         dry_run: Don't click Submit.
+        stop_before_submit: Fill full form and stop before final submit.
         fresh_sessions: Refresh Chrome session cookies before launching.
         total_workers: Total concurrent workers (used for window tiling).
 
@@ -188,7 +191,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             worker_id, limit, target_url, min_score, max_score, max_age_days,
             headless, model, dry_run, fresh_sessions, applied, failed, continuous,
             jobs_done, empty_polls, port, total_workers, no_hitl=no_hitl,
-            keep_browser=keep_browser,
+            keep_browser=keep_browser, stop_before_submit=stop_before_submit,
         )
     finally:
         _stop_worker_listener(worker_id)
@@ -203,11 +206,13 @@ def _worker_loop_body(
     jobs_done: int, empty_polls: int, port: int,
     total_workers: int = 1, no_hitl: bool = False,
     keep_browser: bool = True,
+    stop_before_submit: bool = True,
 ) -> tuple[int, int]:
     """Main per-worker processing loop."""
     from applypilot.apply.launcher import (
         _stop_event, _worker_state, _worker_state_lock,
         _takeover_events, _handback_events, _qa_queue,
+        _review_queue, _review_decisions,
         run_job, acquire_job, mark_result, release_lock,
     )
     # ── Reconnect probe ───────────────────────────────────────────────────────
@@ -306,6 +311,7 @@ def _worker_loop_body(
             result, duration_ms, screening_qs = run_job(
                 job, port=port, worker_id=worker_id,
                 model=model, dry_run=dry_run,
+                stop_before_submit=stop_before_submit,
                 skip_tab_reset=_this_had_interrupted_job,
                 extra_context=_reconnect_ctx,
             )
@@ -339,23 +345,111 @@ def _worker_loop_body(
                         save_ats_session(profile_dir, ats_slug)
                     break
 
+                elif result == "review_ready" or result.startswith("review_ready:"):
+                    # Agent completed filling the full form and stopped before final submit.
+                    add_event(f"[W{worker_id}] FORM FILLED — Ready for final submission: {(job.get('title') or '')[:30]}")
+                    update_state(worker_id, status="review_ready",
+                                 last_action="review ready: awaiting submit")
+                    _register_waiting(worker_id, "waiting_human")
+
+                    # Release dry-run click gate so user can submit in Chrome
+                    try:
+                        from applypilot.apply.chrome import release_dry_run_gate
+                        release_dry_run_gate(port)
+                    except Exception:
+                        pass
+
+                    # Bring Chrome to foreground
+                    try:
+                        from applypilot.apply.chrome import bring_to_foreground_cdp, bring_to_foreground_pid
+                        bring_to_foreground_cdp(port)
+                        with _worker_state_lock:
+                            ws = _worker_state.get(worker_id)
+                            cpid = ws.get("chrome_pid") if ws else None
+                        if cpid:
+                            bring_to_foreground_pid(cpid)
+                    except Exception:
+                        pass
+
+                    # Notify user via desktop / audio notification if available
+                    try:
+                        from applypilot.apply.hitl import notify_human_needed
+                        notify_human_needed(job, "review_ready", job.get("application_url") or job["url"])
+                    except Exception:
+                        pass
+
+                    # Post to _review_queue — main thread will prompt user
+                    review_event = threading.Event()
+                    _review_queue.put((worker_id, job, review_event))
+
+                    # Block until main thread finishes prompting the user
+                    while not _stop_event.is_set():
+                        if review_event.wait(timeout=1.0):
+                            break
+                    _unregister_waiting(worker_id)
+                    if _stop_event.is_set():
+                        break
+
+                    user_decision = _review_decisions.pop(worker_id, "applied")
+                    if user_decision == "applied":
+                        mark_result(job["url"], "applied", duration_ms=duration_ms)
+                        _record_job_history(worker_id, job, "applied", duration_ms)
+                        applied += 1
+                        update_state(worker_id, jobs_applied=applied,
+                                     jobs_done=applied + failed)
+                        if ats_slug:
+                            profile_dir = config.CHROME_WORKER_DIR / f"worker-{worker_id}"
+                            save_ats_session(profile_dir, ats_slug)
+                        break
+                    elif user_decision == "skip":
+                        release_lock(job["url"])
+                        add_event(f"[W{worker_id}] Skipped by user: {(job.get('title') or '')[:30]}")
+                        was_skipped = True
+                        break
+                    else:
+                        # User provided custom instructions to resume agent
+                        extra_ctx = user_decision
+                        add_event(f"[W{worker_id}] Resuming with user instructions...")
+                        update_state(worker_id, status="applying",
+                                     last_action="resuming with instructions",
+                                     start_time=time.time(), actions=0)
+                        result, duration_ms, screening_qs = run_job(
+                            job, port=port, worker_id=worker_id,
+                            model=model, dry_run=dry_run,
+                            stop_before_submit=stop_before_submit,
+                            skip_tab_reset=True, extra_context=extra_ctx,
+                        )
+                        relaunch = True
+                        continue
+
                 elif result == "takeover":
-                    # User clicked "Take Over" in the extension popup.
-                    # The Claude proc was already killed by the takeover handler.
-                    # Wait for the user to click "Give Back Control" (handback event).
+                    # User clicked "Take Over" in the extension popup or pressed pause in terminal.
+                    # The agent proc was already killed by the takeover handler.
+                    # Wait for the user to click "Give Back Control" or resume in terminal.
                     add_event(f"[W{worker_id}] PAUSED by user: {(job.get('title') or '')[:30]}")
                     update_state(worker_id, status="paused_by_user",
                                  last_action="paused by user")
                     _register_waiting(worker_id, "waiting_human")
 
                     hb_event = _handback_events.get(worker_id)
-                    if hb_event:
-                        hb_event.clear()  # Clear any stale signal from previous job
+                    with _worker_state_lock:
+                        ws_check = _worker_state.get(worker_id)
+                        already_resumed = ws_check and ws_check.get("status") == "applying"
+                    if hb_event and not already_resumed:
+                        hb_event.clear()
 
                     while not _stop_event.is_set():
-                        if hb_event and hb_event.wait(timeout=5.0):
+                        with _worker_state_lock:
+                            ws = _worker_state.get(worker_id)
+                            if ws and ws.get("status") == "applying":
+                                break
+                        if hb_event and hb_event.is_set():
+                            break
+                        if hb_event and hb_event.wait(timeout=0.5):
                             break
                     _unregister_waiting(worker_id)
+                    if hb_event:
+                        hb_event.clear()
                     if _stop_event.is_set():
                         break
 
@@ -380,6 +474,7 @@ def _worker_loop_body(
                     result, duration_ms, screening_qs = run_job(
                         job, port=port, worker_id=worker_id,
                         model=model, dry_run=dry_run,
+                        stop_before_submit=stop_before_submit,
                         skip_tab_reset=True, extra_context=extra_ctx,
                     )
                     relaunch = True
@@ -425,7 +520,9 @@ def _worker_loop_body(
                                      start_time=time.time(), actions=0)
                         result, duration_ms, screening_qs = run_job(
                             job, port=port, worker_id=worker_id,
-                            model=model, dry_run=dry_run, skip_tab_reset=True)
+                            model=model, dry_run=dry_run,
+                            stop_before_submit=stop_before_submit,
+                            skip_tab_reset=True)
                         relaunch = True
                         continue
 
@@ -585,7 +682,8 @@ def main(limit: int = 1, target_url: str | None = None,
          min_score: int | None = None, max_score: int | None = None,
          max_age_days: int | None = None,
          headless: bool = False, model: str = "sonnet",
-         dry_run: bool = False, continuous: bool = False,
+         dry_run: bool = False, stop_before_submit: bool = True,
+         continuous: bool = False,
          poll_interval: int = 60, workers: int = 1,
          fresh_sessions: bool = False, no_hitl: bool = False,
          no_focus: bool = False, keep_browser: bool = True) -> None:
@@ -600,6 +698,7 @@ def main(limit: int = 1, target_url: str | None = None,
         headless: Run Chrome in headless mode.
         model: Claude model name.
         dry_run: Don't click Submit.
+        stop_before_submit: Fill full form and stop before final submit.
         continuous: Run forever, polling for new jobs.
         poll_interval: Seconds between DB polls when queue is empty.
         workers: Number of parallel workers (default 1).
@@ -609,7 +708,10 @@ def main(limit: int = 1, target_url: str | None = None,
     """
     from applypilot.apply.launcher import (
         _stop_event, _claude_lock, _claude_procs, _qa_queue,
+        _review_queue, _review_decisions,
+        trigger_takeover, trigger_handback, is_worker_paused,
     )
+    from applypilot.apply.terminal_control import TerminalController
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
     _stop_event.clear()
@@ -667,7 +769,7 @@ def main(limit: int = 1, target_url: str | None = None,
 
     worker_label = f"{workers} worker{'s' if workers > 1 else ''}"
     console.print(f"Launching apply pipeline ({mode_label}, {worker_label}, poll every {POLL_INTERVAL}s)...")
-    console.print("[dim]Ctrl+C = skip current job(s) | Ctrl+C x2 = stop[/dim]")
+    console.print("[dim]Controls: 'p' / Space = Pause & Take Over browser | Ctrl+C = skip job | Ctrl+C x2 = stop[/dim]")
 
     # Double Ctrl+C handler
     _ctrl_c_count = 0
@@ -692,6 +794,9 @@ def main(limit: int = 1, target_url: str | None = None,
             raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _sigint_handler)
+
+    term_ctrl = TerminalController()
+    term_ctrl.start()
 
     try:
         with Live(render_full(), console=console, refresh_per_second=2) as live:
@@ -736,6 +841,7 @@ def main(limit: int = 1, target_url: str | None = None,
                         headless=headless,
                         model=model,
                         dry_run=dry_run,
+                        stop_before_submit=stop_before_submit,
                         fresh_sessions=fresh_sessions,
                         total_workers=workers,
                         no_hitl=no_hitl,
@@ -744,17 +850,22 @@ def main(limit: int = 1, target_url: str | None = None,
                     for i in range(workers)
                 }
 
-                # --- Main thread event loop: Q&A input + all-blocked detection ---
+                # --- Main thread event loop: Q&A input + pause/takeover control + all-blocked detection ---
                 _all_blocked_prompted = False
+                _active_takeover_wid: int | None = None
+
                 while not all(f.done() for f in futures):
-                    # Check Q&A queue for screening questions from workers
+                    # 1. Check Q&A queue for screening questions from workers
                     try:
-                        wid, questions, answer_event = _qa_queue.get(timeout=0.5)
+                        wid, questions, answer_event = _qa_queue.get(timeout=0.1)
                         _dashboard_running = False  # pause refresh thread
-                        time.sleep(0.6)  # let refresh thread finish current cycle
+                        time.sleep(0.3)
                         live.stop()
 
+                        term_ctrl.stop()
                         answers = _prompt_user_for_qa(console, wid, questions)
+                        term_ctrl.start()
+
                         # Store answers in Q&A knowledge base
                         from applypilot.database import store_qa
                         for q_dict, ans in zip(questions, answers):
@@ -768,7 +879,63 @@ def main(limit: int = 1, target_url: str | None = None,
                     except queue.Empty:
                         pass
 
-                    # Check if all workers are blocked
+                    # 1b. Check Review queue for review_ready applications from workers
+                    try:
+                        wid, r_job, r_event = _review_queue.get(timeout=0.1)
+                        _dashboard_running = False  # pause refresh thread
+                        time.sleep(0.3)
+                        live.stop()
+
+                        term_ctrl.stop()
+                        decision = term_ctrl.prompt_review_ready(console, r_job, wid)
+                        _review_decisions[wid] = decision
+                        term_ctrl.start()
+
+                        r_event.set()  # unblock the worker
+
+                        live.start()
+                        _dashboard_running = True
+                    except queue.Empty:
+                        pass
+
+                    # 2. Check for terminal keyboard input ('p', 'P', or space) to toggle pause / takeover
+                    key = term_ctrl.check_key(timeout=0.05)
+                    pause_requested = key is not None and key.lower() in ("p", " ")
+
+                    paused_wid = None
+                    if pause_requested:
+                        # Find an active worker to pause
+                        for wid in range(workers):
+                            if not is_worker_paused(wid):
+                                ws = get_state(wid)
+                                if ws and ws.status not in ("done", "idle", "review_ready"):
+                                    paused_wid = wid
+                                    break
+                        if paused_wid is not None:
+                            trigger_takeover(paused_wid)
+                    else:
+                        # Check if any worker transitioned to paused_by_user (e.g. from extension)
+                        for wid in range(workers):
+                            if is_worker_paused(wid):
+                                paused_wid = wid
+                                break
+
+                    # If a worker is paused and we need to prompt the user in terminal:
+                    if paused_wid is not None and _active_takeover_wid is None and is_worker_paused(paused_wid):
+                        _active_takeover_wid = paused_wid
+                        _dashboard_running = False
+                        time.sleep(0.3)
+                        live.stop()
+
+                        instructions = term_ctrl.prompt_takeover(console, paused_wid)
+                        trigger_handback(paused_wid, instructions=instructions)
+                        _active_takeover_wid = None
+
+                        live.start()
+                        _dashboard_running = True
+                        term_ctrl.flush()
+
+                    # 3. Check if all workers are blocked
                     waiting = _get_waiting_count()
                     active_workers = sum(
                         1 for f in futures if not f.done()
@@ -806,6 +973,7 @@ def main(limit: int = 1, target_url: str | None = None,
     except KeyboardInterrupt:
         pass
     finally:
+        term_ctrl.stop()
         _stop_event.set()
         stop_health_checks()
         restore_focus_mode(_prev_focus_mode)

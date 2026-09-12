@@ -172,6 +172,7 @@ _STATUS_STYLES: dict[str, str] = {
     "done": "bold",
     "waiting_human": "bold magenta",
     "waiting_answer": "bold cyan",
+    "paused_by_user": "bold yellow",
 }
 
 
@@ -181,7 +182,12 @@ def render_dashboard() -> Table:
     Returns:
         A Rich Table object ready for display.
     """
-    table = Table(title="ApplyPilot Dashboard", expand=True, show_lines=False)
+    table = Table(
+        title="ApplyPilot Dashboard",
+        caption="[dim]Controls: [[bold yellow]p[/bold yellow]/[bold yellow]space[/bold yellow]] Pause/Resume takeover | [[bold red]Ctrl+C[/bold red]] Skip job | [[bold red]Ctrl+C x2[/bold red]] Stop[/dim]",
+        expand=True,
+        show_lines=False,
+    )
     table.add_column("W", width=3, justify="center")
     table.add_column("Job", min_width=30, max_width=50, no_wrap=True)
     table.add_column("Status", width=12, justify="center")
