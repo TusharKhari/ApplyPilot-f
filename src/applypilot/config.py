@@ -107,14 +107,53 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+def get_profile_path() -> Path:
+    """Return the profile path, preferring ~/.applypilot/profile.json, falling back to CWD profile.json."""
+    if PROFILE_PATH.exists():
+        return PROFILE_PATH
+    cwd_profile = Path.cwd() / "profile.json"
+    if cwd_profile.exists():
+        return cwd_profile
+    return PROFILE_PATH
+
+
+def get_default_resume_path() -> Path | None:
+    """Find default master resume path.
+
+    Checks:
+      1. ~/.applypilot/resume.pdf / .docx
+      2. ./documents/cv.pdf / .docx / resume.pdf / resume.docx
+      3. Any CV or resume file in ./documents/
+    """
+    for candidate in [
+        APP_DIR / "resume.pdf",
+        APP_DIR / "resume.docx",
+        Path.cwd() / "documents" / "cv.pdf",
+        Path.cwd() / "documents" / "cv.docx",
+        Path.cwd() / "documents" / "resume.pdf",
+        Path.cwd() / "documents" / "resume.docx",
+    ]:
+        if candidate.exists():
+            return candidate
+
+    docs_dir = Path.cwd() / "documents"
+    if docs_dir.exists() and docs_dir.is_dir():
+        for f in docs_dir.iterdir():
+            if f.suffix.lower() in (".pdf", ".docx") and ("cv" in f.name.lower() or "resume" in f.name.lower()):
+                return f
+
+    return None
+
+
 def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
+    """Load user profile from ~/.applypilot/profile.json or CWD profile.json."""
     import json
-    if not PROFILE_PATH.exists():
+    path = get_profile_path()
+    if not path.exists():
         raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
+            f"Profile not found at {PROFILE_PATH} or ./profile.json. Please create profile.json first."
         )
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def load_search_config() -> dict:
@@ -221,7 +260,7 @@ TIER_LABELS = {
 }
 
 TIER_COMMANDS: dict[int, list[str]] = {
-    1: ["init", "run discover", "run enrich", "status", "dashboard"],
+    1: ["run discover", "run enrich", "status", "dashboard"],
     2: ["run score", "run tailor", "run cover", "run pdf", "run", "track"],
     3: ["apply"],
 }
@@ -309,7 +348,7 @@ def check_tier(required: int, feature: str) -> None:
 
     missing: list[str] = []
     if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "NVIDIA_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY / NVIDIA_API_KEY / DEEPSEEK_API_KEY")
+        missing.append("LLM API key — set in .env or export GEMINI_API_KEY / NVIDIA_API_KEY / DEEPSEEK_API_KEY")
     if required >= 3:
         has_agent = (get_hermes_path() is not None) or (shutil.which("claude") is not None)
         if not has_agent:

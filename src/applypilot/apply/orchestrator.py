@@ -552,8 +552,9 @@ def _prompt_user_for_qa(console: Console, worker_id: int,
     """
     console.print(f"\n[bold cyan]Worker {worker_id} needs your help with screening questions:[/bold cyan]")
     answers: list[str] = []
-    for i, q in enumerate(questions, 1):
-        console.print(f"\n  [bold]Q{i}:[/bold] {q['question']}")
+    for i, raw_q in enumerate(questions, 1):
+        q = {"question": raw_q} if isinstance(raw_q, str) else dict(raw_q)
+        console.print(f"\n  [bold]Q{i}:[/bold] {q.get('question', str(q))}")
         if q.get("field_type"):
             console.print(f"  [dim]Type: {q['field_type']}[/dim]")
         if q.get("options"):
@@ -757,10 +758,11 @@ def main(limit: int = 1, target_url: str | None = None,
                         answers = _prompt_user_for_qa(console, wid, questions)
                         # Store answers in Q&A knowledge base
                         from applypilot.database import store_qa
-                        for q_dict, ans in zip(questions, answers):
+                        for q_item, ans in zip(questions, answers):
                             if ans:
-                                store_qa(q_dict["question"], ans, source="human",
-                                         field_type=q_dict.get("field_type"))
+                                q_text = q_item["question"] if isinstance(q_item, dict) else str(q_item)
+                                ft = q_item.get("field_type") if isinstance(q_item, dict) else None
+                                store_qa(q_text, ans, source="human", field_type=ft)
                         answer_event.set()  # unblock the worker
 
                         live.start()

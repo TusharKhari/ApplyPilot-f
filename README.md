@@ -28,6 +28,10 @@ cd ApplyPilot
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+export DEEPSEEK_API_KEY="YOUR_DEEPSEEK_API_KEY"
+export GROK_API_KEY="YOUR_GROK_API_KEY"
+export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY"
 ```
 
 ### 2. Configuration

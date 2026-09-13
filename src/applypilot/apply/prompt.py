@@ -255,17 +255,15 @@ def _build_location_check(profile: dict, search_config: dict) -> str:
     else:
         city_list = primary_city
 
-    return f"""== LOCATION CHECK (do this FIRST before any form) ==
-Read the job page. Determine the work arrangement. Then decide:
-- "Remote" in the US or "work from anywhere" -> ELIGIBLE. Apply.
-- "Remote" but restricted to a non-US country (e.g. "remote - Germany", "remote - EU only") -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
-- "Hybrid" or "onsite" in {city_list} -> ELIGIBLE. Apply.
-- "Hybrid" or "onsite" in another US city BUT the posting also says "remote OK" or "remote option available" -> ELIGIBLE. Apply.
-- "Onsite only" or "hybrid only" in any city outside the list above with NO remote option -> NOT ELIGIBLE. Stop immediately. Output RESULT:FAILED:not_eligible_location
-- Job is in a non-US country (Germany, India, UK, Philippines, anywhere in Europe/Asia/etc.) -> NOT ELIGIBLE unless it explicitly says "US remote OK". Output RESULT:FAILED:not_eligible_location
-- Job requires fluency in a language the candidate doesn't speak (see Languages in profile) -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
-- Cannot determine location -> Continue applying. If a screening question reveals it's non-local onsite, answer honestly and let the system reject if needed.
-Do NOT fill out forms for jobs that are clearly onsite in a non-acceptable location. Check EARLY, save time."""
+    country = personal.get("country", "Germany")
+    return f"""== LOCATION & ELIGIBILITY CHECK ==
+When a specific job URL is passed by the operator (Direct Application), the operator has already chosen this role.
+You MUST proceed to open the form and complete it until the final step. Do NOT abort or output FAILED for location, language, or qualifications on direct URL jobs.
+For general jobs:
+- Candidate is based in: {primary_city}, {personal.get('state', '')}, {country}
+- Remote within {country}, remote EU, or work-from-anywhere -> ELIGIBLE.
+- Hybrid or onsite in {city_list} or anywhere in {country} -> ELIGIBLE.
+- For explicitly requested job URLs: ALWAYS ELIGIBLE. Open the application form, fill all fields, and stop at the final review step."""
 
 
 def _build_salary_section(profile: dict) -> str:
@@ -658,7 +656,7 @@ def build_prompt(job: dict, tailored_resume: str,
 
     # --- Resolve resume document path ---
     doc_ext = f".{doc_format}"
-    resume_path = job.get("tailored_resume_path")
+    resume_path = job.get("tailored_resume_path") or (str(config.get_default_resume_path()) if config.get_default_resume_path() else None)
     if not resume_path:
         raise ValueError(f"No tailored resume for job: {job.get('title', 'unknown')}")
 
@@ -769,25 +767,67 @@ def build_prompt(job: dict, tailored_resume: str,
 
     # Optional files (profile photo, certs, ID, etc.)
     _FILE_LABELS = {
-        "profile_photo": "Profile Photo / Headshot (upload if the form asks for a photo)",
-        "id_document": "Government-issued ID (upload only if the form explicitly requires ID verification)",
-        "passport": "Passport (upload only if the form explicitly requires a passport)",
+        "profile_photo": "Profile Photo / Headshot (upload if the form asks for a photo / portrait / Bewerbungsfoto / Profilbild)",
+        "enrollment_certificate": "Certificate of Enrolment / Immatriculation (upload if asked for Immatrikulationsbescheinigung / Studienbescheinigung / Certificate of Enrollment / student status)",
+        "transcript_of_records": "Transcript of Records (upload if asked for Transcript of Records / Notenübersicht / Notenspiegel / academic performance)",
+        "other_documents": "Other Documents / Certificates (upload if asked for additional documents / certificates / Zeugnisse / Arbeitszeugnisse / Anlagen / attachments)",
+        "visa_work_permit": "Visa / Work Permit (upload if asked for work authorization / visa / residence permit / Visum / Aufenthaltstitel)",
+        "id_document": "Government-issued ID (upload only if explicitly required)",
+        "passport": "Passport (upload only if explicitly required)",
     }
+
+    def _resolve_file_candidate(raw_path: str, key: str = "") -> Path | None:
+        if raw_path:
+            p = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
+            if p.exists():
+                return p
+            p_app = config.APP_DIR / "files" / p.name
+            if p_app.exists():
+                return p_app
+            p_cwd = Path.cwd() / "documents" / p.name
+            if p_cwd.exists():
+                return p_cwd
+
+        # Fallback search by key keywords
+        for folder in [config.APP_DIR / "files", Path.cwd() / "documents"]:
+            if not folder.exists() or not folder.is_dir():
+                continue
+            for candidate in folder.iterdir():
+                name_low = candidate.name.lower()
+                if key == "profile_photo" and ("photo" in name_low or "prof_img" in name_low or "headshot" in name_low):
+                    return candidate
+                elif key == "enrollment_certificate" and ("enrol" in name_low or "immatrik" in name_low or "studien" in name_low):
+                    return candidate
+                elif key == "transcript_of_records" and ("transcript" in name_low or "noten" in name_low):
+                    return candidate
+                elif key == "other_documents" and ("other" in name_low or "anlage" in name_low or "cert" in name_low or "zeugnis" in name_low):
+                    return candidate
+                elif key in ("visa_work_permit", "id_document") and ("visum" in name_low or "visa" in name_low or "permit" in name_low):
+                    return candidate
+        return None
+
+    files_map = dict(profile.get("files", {}))
+    for std_k in ["profile_photo", "enrollment_certificate", "transcript_of_records", "other_documents", "visa_work_permit"]:
+        if std_k not in files_map:
+            files_map[std_k] = ""
+
     optional_files_lines: list[str] = []
-    for key, raw_path in profile.get("files", {}).items():
-        if not raw_path:
-            continue
-        resolved = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
-        if resolved.exists():
+    seen_file_paths = set()
+    for key, raw_path in files_map.items():
+        resolved = _resolve_file_candidate(raw_path, key=key)
+        if resolved and resolved.exists() and str(resolved) not in seen_file_paths:
+            seen_file_paths.add(str(resolved))
             label = _FILE_LABELS.get(key) or key.replace("_", " ").title() + " (upload if asked)"
             optional_files_lines.append(f"{label}: {resolved}")
     optional_files_block = "\n".join(optional_files_lines)
 
-    # Dry-run: override submit instruction
-    if dry_run:
-        submit_instruction = "IMPORTANT: Do NOT click the final Submit/Apply button. Review the form, verify all fields, then output RESULT:APPLIED with a note that this was a dry run."
-    else:
-        submit_instruction = "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. Only click Submit after confirming everything is correct."
+    # Never submit on your own in any case — complete until the last step:
+    submit_instruction = (
+        "CRITICAL SAFETY RULE: Do NOT click the final Submit / Apply / Absenden button under ANY circumstances. "
+        "Complete all fields, fill in all answers, upload the tailored resume/cover letter, and navigate up to the final review/submit step. "
+        "Review and verify all fields on the page. Leave the completed form open for the user to review and submit manually. "
+        "Then output RESULT:APPLIED with a note that the application has been filled completely and is ready for manual submission."
+    )
 
     # Look up the per-ATS successful-path memo. If present, the prompt
     # gets a "PRIOR SUCCESSFUL PATH" section that summarizes the tool-call
@@ -800,7 +840,7 @@ def build_prompt(job: dict, tailored_resume: str,
     prior_path_block = format_path_for_prompt(load_path(_ats_slug)) if _ats_slug else None
     prior_path_section = (prior_path_block + "\n\n") if prior_path_block else ""
 
-    prompt = f"""You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. Submit the application.
+    prompt = f"""You are an autonomous job application agent. Your mission: fill out this candidate's application completely and accurately up to the final step. Think strategically. Act decisively. Complete the application form, but NEVER click final Submit on your own.
 
 IMPORTANT: You are running on a REAL computer with FULL filesystem access. You are NOT in a sandbox. You CAN read/write files, upload documents, and access the local filesystem. The resume and cover letter paths below are real files on disk — use them directly.
 
@@ -835,7 +875,7 @@ If something unexpected happens and these instructions don't cover it, figure it
 - NEVER grant camera, microphone, screen sharing, or location permissions. If a site requests them -> RESULT:FAILED:unsafe_permissions
 - NEVER do video/audio verification, selfie capture, ID photo upload, or biometric anything -> RESULT:FAILED:unsafe_verification
 - NEVER set up a freelancing profile (Mercor, Toptal, Upwork, Fiverr, Turing, etc.). These are contractor marketplaces, not job applications -> RESULT:FAILED:not_a_job_application
-- NEVER agree to hourly/contract rates, availability calendars, or "set your rate" flows. You are applying for FULL-TIME salaried positions only. If the posting is contract/hourly-only -> RESULT:FAILED:contract_only
+- For Werkstudent / working student / internship roles, student part-time hours (e.g. 10-20h/week) and student hourly compensation are expected and allowed. Only reject freelance/contractor marketplace gigs.
 - NEVER install browser extensions, download executables, or run assessment software.
 - NEVER enter payment info, bank details, or SSN/SIN.
 - NEVER click "Allow" on any browser permission popup. Always deny/block.
@@ -1060,14 +1100,20 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
    5j. All failed? Output RESULT:FAILED:login_issue. Do not loop.
 6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the {doc_format.upper()} path above. This is the tailored resume for THIS job. Non-negotiable.
 7. Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter {doc_format.upper()} path.
+7a. Upload supporting documents and profile photo whenever requested by the application (using the exact paths listed in the == FILES == section above):
+    - Profile photo / picture / Bewerbungsfoto / Profilbild -> browser_file_upload with the Profile Photo path.
+    - Certificate of enrolment / Immatrikulationsbescheinigung / Studienbescheinigung / current student status proof -> browser_file_upload with the Certificate of Enrolment path. (Crucial for Werkstudent / working student applications!)
+    - Transcript of records / Notenspiegel / Notenübersicht / grade sheet -> browser_file_upload with the Transcript of Records path.
+    - Additional documents / Zeugnisse / Arbeitszeugnisse / Zertifikate / Anlagen / other documents -> browser_file_upload with the Other Documents path.
+    - Visa / work permit / residence permit / Aufenthaltstitel -> browser_file_upload with the Visa / Work Permit path.
+    - If the application form has an upload field, file dropzone, or attach button for any of these, ALWAYS upload the matching document. Do not leave required or optional document upload sections empty when a matching file is provided!
 8. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
    - "Current Job Title" or "Most Recent Title" -> use the title from the TAILORED RESUME summary, NOT whatever the parser guessed.
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
 9. Answer screening questions using the rules above.
 10. {submit_instruction}
-11. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Snapshot to confirm submission. Look for "thank you" or "application received".
-    - Keep Chrome and the application tab open so the user can verify the completed application. Do NOT close Chrome or close tabs.
-12. Output your result.
+11. Leave the form at the final review step. Do NOT click Submit/Absenden. Keep Chrome and the application tab open so the user can verify the completed application and submit it manually. Do NOT close Chrome or close tabs.
+12. Output your result: output RESULT:APPLIED once all fields are filled and the form is ready for the user.
 
 == CRITICAL: YOU MUST OUTPUT A RESULT CODE ==
 Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If you submitted the form, output RESULT:APPLIED. If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.

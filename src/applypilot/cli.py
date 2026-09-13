@@ -85,7 +85,7 @@ def apply(
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Autonomous agent backend: hermes (default if installed) or claude."),
     model: str = typer.Option("sonnet", "--model", "-m", help="Agent model name (nvidia/nemotron-3.5-lightning-30b-a3b, moonshotai/kimi-k3, or deepseek-flash for Hermes, sonnet for Claude)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
+    dry_run: bool = typer.Option(True, "--dry-run/--submit", help="Fill application until the last step without submitting (default: True)."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
@@ -111,12 +111,14 @@ def apply(
     # --- Utility modes (no Chrome/Claude needed) ---
 
     if mark_applied:
+        mark_applied = mark_applied.strip().strip("'\"“”‘’")
         from applypilot.apply.launcher import mark_job
         mark_job(mark_applied, "applied")
         console.print(f"[green]Marked as applied:[/green] {mark_applied}")
         return
 
     if mark_failed:
+        mark_failed = mark_failed.strip().strip("'\"“”‘’")
         from applypilot.apply.launcher import mark_job
         mark_job(mark_failed, "failed", reason=fail_reason)
         console.print(f"[yellow]Marked as failed:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
@@ -197,10 +199,10 @@ def apply(
             model = "deepseek-flash"
 
     # Check 2: Profile exists
-    if not _profile_path.exists():
+    if not config.get_profile_path().exists():
         console.print(
             "[red]Profile not found.[/red]\n"
-            "Run [bold]applypilot init[/bold] to create your profile first."
+            "Create [bold]profile.json[/bold] at ~/.applypilot/profile.json or in the working directory first."
         )
         raise typer.Exit(code=1)
 
@@ -247,6 +249,7 @@ def apply(
     from applypilot.apply.launcher import main as apply_main
 
     if url:
+        url = url.strip().strip("'\"“”‘’")
         workers = 1
         continuous = False
     effective_limit = limit if limit is not None else (1 if url else (0 if continuous else 1))

@@ -73,7 +73,7 @@ _DRY_RUN_GATE_JS = r"""
   // alone — many ATS submit controls are <a role="button"> or custom
   // <div onclick>, not <button type="submit">.
   const SUBMIT_RE =
-    /\b(submit application|submit my application|submit and apply|submit$|apply now|send application|finish application|complete application|complete and submit)\b/i;
+    /\b(submit application|submit my application|submit and apply|submit$|apply now|send application|finish application|complete application|complete and submit|bewerbung absenden|jetzt bewerben|absenden$|unterlagen absenden|bewerben$|antrag einreichen|jetzt absenden)\b/i;
   document.addEventListener('click', e => {
     if (!window.__ap_dry_run_active) return;
     let t = e.target;

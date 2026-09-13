@@ -1684,7 +1684,8 @@ def acquire_job(target_url: str | None = None,
             if not existing:
                 from urllib.parse import urlparse
                 site = urlparse(target_url).netloc.replace("www.", "")
-                default_resume = str(config.RESUME_PDF_PATH) if config.RESUME_PDF_PATH.exists() else None
+                default_resume_path = config.get_default_resume_path()
+                default_resume = str(default_resume_path) if default_resume_path else None
                 conn.execute("""
                     INSERT OR IGNORE INTO jobs (url, title, site, application_url, discovered_at, tailored_resume_path, fit_score)
                     VALUES (?, ?, ?, ?, datetime('now'), ?, 10)
@@ -1702,9 +1703,10 @@ def acquire_job(target_url: str | None = None,
                 if not (row_dict.get("application_url") or "").strip():
                     updates.append("application_url = ?")
                     params.append(target_url)
-                if not row_dict.get("tailored_resume_path") and config.RESUME_PDF_PATH.exists():
+                default_resume_path = config.get_default_resume_path()
+                if not row_dict.get("tailored_resume_path") and default_resume_path:
                     updates.append("tailored_resume_path = ?")
-                    params.append(str(config.RESUME_PDF_PATH))
+                    params.append(str(default_resume_path))
                 if row_dict.get("apply_status") in ("manual", "in_progress", "failed"):
                     updates.append("apply_status = NULL, apply_error = NULL, apply_category = NULL")
                 if updates:
@@ -2202,17 +2204,16 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     if not skip_tab_reset:
         _reset_browser_tabs(port)
 
-    # Hard dry-run gate: install a CDP-side script that blocks form
+    # Hard safety gate: install a CDP-side script that blocks form
     # submits and clicks on submit-style buttons. Belt to the prompt's
-    # suspenders — even if the model ignores the prompt instruction
-    # (Haiku has done this), the click never reaches a handler.
-    if dry_run:
-        try:
-            from applypilot.apply.chrome import inject_dry_run_gate
-            inject_dry_run_gate(port)
-        except Exception:
-            logger.debug("dry_run gate injection failed; falling back to prompt-only",
-                         exc_info=True)
+    # suspenders — even if the model ignores the prompt instruction,
+    # the click never reaches a handler.
+    try:
+        from applypilot.apply.chrome import inject_dry_run_gate
+        inject_dry_run_gate(port)
+    except Exception:
+        logger.debug("dry_run gate injection failed; falling back to prompt-only",
+                     exc_info=True)
 
     # Wipe stale resume / cover-letter / MCP-config copies from the previous
     # job BEFORE build_prompt writes the fresh files. Earlier this wipe sat
