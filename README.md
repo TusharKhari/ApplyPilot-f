@@ -2,7 +2,7 @@
 
 **Autonomous, AI-Powered Job Application Assistant & Form Filler. Open Source.**
 
-ApplyPilot takes the tedious, repetitive pain out of job hunting. Powered by modern autonomous AI agents (Claude Code CLI or Hermes Agent) and browser automation (Chrome CDP + Playwright MCP), ApplyPilot opens job portals, navigates complex multi-page application forms, auto-fills personal details, work authorization, education, and work history, answers custom screening questions using a persistent Q&A memory, uploads the right documents in the right priority order, and securely logs every application.
+ApplyPilot takes the tedious, repetitive pain out of job hunting. Powered by modern autonomous AI agents (**Claude Code CLI** or the open-source **Hermes Agent**) and browser automation (**Chrome CDP + Playwright MCP**), ApplyPilot opens job portals, navigates complex multi-page application forms, auto-fills personal details, work authorization, education, and work history, answers custom screening questions using a persistent Q&A memory, uploads the right documents in the right priority order, and securely logs every application.
 
 ---
 
@@ -15,15 +15,22 @@ ApplyPilot takes the tedious, repetitive pain out of job hunting. Powered by mod
 - [Step-by-Step Setup Guide](#step-by-step-setup-guide)
   - [🍎 macOS Setup](#-macos-setup)
   - [🪟 Windows Setup](#-windows-setup)
+- [🤖 Choosing & Configuring Your AI Agent (Claude vs. Hermes)](#-choosing--configuring-your-ai-agent-claude-vs-hermes)
+  - [Why Use Hermes Agent?](#why-use-hermes-agent)
+  - [Why Use Claude Code CLI?](#why-use-claude-code-cli)
+  - [Agent Comparison & Supported Models](#agent-comparison--supported-models)
+  - [How to Switch Between Agents](#how-to-switch-between-agents)
 - [Setting Up API Keys (.env)](#setting-up-api-keys-env)
 - [Configuring Your Profile (profile.json)](#configuring-your-profile-profilejson)
 - [Managing Documents & The Cover Letter Feature](#managing-documents--the-cover-letter-feature)
 - [Customizing Application Instructions (prompt.txt)](#customizing-application-instructions-prompttxt)
 - [How to Run ApplyPilot](#how-to-run-applypilot)
   - [1. Recommended Workflow (Review-First Mode)](#1-recommended-workflow-review-first-mode)
-  - [2. Preview Mode (Dry Run)](#2-preview-mode-dry-run)
-  - [3. Fully Autonomous Mode (Auto-Submit)](#3-fully-autonomous-mode-auto-submit)
-  - [4. Inspect Agent Prompts (--gen)](#4-inspect-agent-prompts---gen)
+  - [2. Running with Hermes Agent (Open Source / Low Cost)](#2-running-with-hermes-agent-open-source--low-cost)
+  - [3. Running with Claude Code CLI](#3-running-with-claude-code-cli)
+  - [4. Preview Mode (Dry Run)](#4-preview-mode-dry-run)
+  - [5. Fully Autonomous Mode (Auto-Submit)](#5-fully-autonomous-mode-auto-submit)
+  - [6. Inspect Agent Prompts (--gen)](#6-inspect-agent-prompts---gen)
 - [Useful Commands (Tracking, Q&A, Credentials)](#useful-commands-tracking-qa-credentials)
 - [Troubleshooting & FAQs](#troubleshooting--faqs)
 - [License](#license)
@@ -46,6 +53,7 @@ Applying for jobs online today is broken. Every company uses a different Applica
 ## Key Features
 
 - 🎯 **Direct URL Applications**: Simply run `applypilot apply --url "https://..."` to apply to any supported job posting.
+- 🤖 **Flexible Agent Support (Claude & Hermes)**: Run with **Claude Code CLI** (Anthropic Claude Sonnet) or the open-source **Hermes Agent** powered by DeepSeek, NVIDIA NIM, or Google Gemini.
 - 🛡️ **Stop-Before-Submit (Review-First Safety)**: By default, the agent fills all form fields, answers questions, uploads documents, and pauses on the final review page. You get to verify everything in Chrome before submitting.
 - 📂 **Intelligent Document Upload Hierarchy**:
   1. **Priority 1 — Resume / CV (`cv.pdf`)**: Always uploaded fresh to Resume / CV / Lebenslauf fields.
@@ -91,7 +99,10 @@ Applying for jobs online today is broken. Every company uses a different Applica
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │            Autonomous Browser Agent Subprocess              │
-│            (Claude Code CLI  OR  Hermes Agent)              │
+│     ┌─────────────────────────────────────────────────┐     │
+│     │  Option A: Claude Code CLI (Claude 3.7 Sonnet)  │     │
+│     │  Option B: Hermes Agent (DeepSeek / NVIDIA NIM) │     │
+│     └─────────────────────────────────────────────────┘     │
 │                              │                              │
 │                Playwright MCP / Chrome CDP                  │
 │                              ▼                              │
@@ -116,8 +127,8 @@ Applying for jobs online today is broken. Every company uses a different Applica
 | **Python** | 3.11 or higher | Core ApplyPilot runtime |
 | **Git** | Any modern version | Downloading and updating the code |
 | **Google Chrome** | Latest stable | The browser controlled by the agent |
-| **Node.js** | v18.0 or higher (with `npm` & `npx`) | Required for Playwright MCP and Claude Code CLI |
-| **AI Agent** | Claude Code CLI (or Hermes Agent) | The autonomous brain that operates the browser |
+| **Node.js** | v18.0 or higher (with `npm` & `npx`) | Required for Playwright MCP server |
+| **AI Agent Backend** | **Hermes Agent** *(Free/Open Source)* OR **Claude Code CLI** | The autonomous brain that operates the browser |
 
 ---
 
@@ -166,16 +177,34 @@ pip install --upgrade pip
 pip install -e .
 ```
 
-#### Step 7: Install Claude Code CLI
-Install the Claude Code CLI tool globally via npm:
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-Log in to your Claude account by running:
-```bash
-claude
-```
-Follow the on-screen prompt to authenticate with Anthropic, then type `/exit` to return to your terminal.
+#### Step 7: Install Your Preferred AI Agent
+
+You can choose **Hermes Agent** (recommended for low cost and open models) or **Claude Code CLI** (or both!):
+
+- **Option A: Hermes Agent (Open Source — Recommended)**:
+  Install Hermes Agent in your environment:
+  ```bash
+  pip install hermes-agent
+  ```
+  *Alternatively, via the official install script:*
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/nousresearch/hermes-agent/main/install.sh | bash
+  ```
+  Verify the installation:
+  ```bash
+  hermes --version
+  ```
+
+- **Option B: Claude Code CLI**:
+  Install globally via npm:
+  ```bash
+  npm install -g @anthropic-ai/claude-code
+  ```
+  Log in to your Claude account by running:
+  ```bash
+  claude
+  ```
+  Follow the on-screen prompt to authenticate with Anthropic, then type `/exit` to return to your terminal.
 
 ---
 
@@ -219,15 +248,78 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-#### Step 7: Install Claude Code CLI
-```powershell
-npm install -g @anthropic-ai/claude-code
-```
-Log in to your Claude account:
-```powershell
-claude
-```
-Follow the login instructions in your browser, then type `/exit` to return to PowerShell.
+#### Step 7: Install Your Preferred AI Agent
+
+- **Option A: Hermes Agent (Open Source — Recommended)**:
+  ```powershell
+  pip install hermes-agent
+  ```
+  Verify the installation:
+  ```powershell
+  hermes --version
+  ```
+
+- **Option B: Claude Code CLI**:
+  ```powershell
+  npm install -g @anthropic-ai/claude-code
+  ```
+  Log in to your Claude account:
+  ```powershell
+  claude
+  ```
+  Follow the login instructions in your browser, then type `/exit` to return to PowerShell.
+
+---
+
+## 🤖 Choosing & Configuring Your AI Agent (Claude vs. Hermes)
+
+ApplyPilot supports two autonomous browser agent engines: **Hermes Agent** and **Claude Code CLI**. You can use whichever fits your workflow best.
+
+### Why Use Hermes Agent?
+1. **No Expensive Anthropic Subscription**: You don't need a Claude Max or Claude Pro account.
+2. **Flexible & Cost-Effective LLM Backends**:
+   - **DeepSeek** (`deepseek-flash`): Incredibly fast, smart, and costs fractions of a cent per application.
+   - **NVIDIA NIM** (`nvidia/nemotron-3.5-lightning-30b-a3b` or `moonshotai/kimi-k3`): Free tier credits available with top-tier reasoning.
+   - **Google Gemini** (`gemini-3.6-flash`): Generous free tier via Google AI Studio.
+3. **100% Open Source**: Developed by Nous Research for autonomous local task execution.
+
+### Why Use Claude Code CLI?
+1. Powered directly by Anthropic's flagship **Claude 3.7 / 3.5 Sonnet**.
+2. Industry-leading browser comprehension and complex edge-case recovery.
+3. Requires an Anthropic Claude subscription or API billing.
+
+### Agent Comparison & Supported Models
+
+| Feature | Hermes Agent 🪶 | Claude Code CLI 🧠 |
+|---|---|---|
+| **License** | Open Source (Nous Research) | Proprietary (Anthropic) |
+| **Subscription Required?** | ❌ No subscription required | ✅ Requires Anthropic account / subscription |
+| **Default Models** | `deepseek-flash`<br>`nvidia/nemotron-3.5-lightning-30b-a3b`<br>`gemini-3.6-flash` | `sonnet` (Claude 3.7/3.5 Sonnet) |
+| **Supported API Keys** | `DEEPSEEK_API_KEY`, `NVIDIA_API_KEY`, `GEMINI_API_KEY` | Anthropic browser login / Max plan |
+| **Average Cost per Job** | ~$0.001 - $0.01 (or free tier) | Included in subscription plan |
+
+### How to Switch Between Agents
+
+ApplyPilot makes switching completely effortless:
+
+1. **Automatic Detection (Hermes Default)**:
+   If Hermes is installed in your system (on PATH or at `~/.local/bin/hermes`), ApplyPilot **automatically selects Hermes** as your default agent! If not found, it falls back to Claude.
+
+2. **Explicit CLI Flag**:
+   You can force either agent at any time when running:
+   ```bash
+   # Use Hermes Agent
+   applypilot apply --agent hermes --url "https://..."
+
+   # Use Claude Code CLI
+   applypilot apply --agent claude --url "https://..."
+   ```
+
+3. **Set Default in `.env`**:
+   Add this line to your `.env` file to lock in your preferred agent:
+   ```bash
+   APPLYPILOT_AGENT=hermes   # or APPLYPILOT_AGENT=claude
+   ```
 
 ---
 
@@ -252,18 +344,30 @@ Open `.env` in any text editor (VS Code, Notepad, or TextEdit):
 
 ```bash
 # ===========================================================================
+# AI Agent & Provider Selection
+# ===========================================================================
+# Choose default agent: "hermes" or "claude" (defaults to hermes if installed)
+APPLYPILOT_AGENT=hermes
+
+# ===========================================================================
 # LLM Provider Keys
 # ===========================================================================
 
-# 1. Google Gemini (Recommended & Free Tier Available!)
+# 1. DeepSeek (Recommended for Hermes Agent — high speed & lowest cost)
+# Get a key at: https://platform.deepseek.com/
+DEEPSEEK_API_KEY=sk-...
+
+# 2. NVIDIA NIM (Great free tier with Kimi-K3 & Nemotron-3.5)
+# Get a key at: https://build.nvidia.com/
+NVIDIA_API_KEY=nvapi-...
+
+# 3. Google Gemini (Recommended for free tier)
 # Get your free key at: https://aistudio.google.com/
 GEMINI_API_KEY=AIzaSy...
 
-# Optional Fallbacks (Used if Gemini rate limits or for alternative agents):
-# ANTHROPIC_API_KEY=sk-ant-...
+# 4. Optional Fallback Providers
 # OPENAI_API_KEY=sk-...
-# DEEPSEEK_API_KEY=sk-...
-# NVIDIA_API_KEY=nvapi-...
+# ANTHROPIC_API_KEY=sk-ant-...
 
 # ===========================================================================
 # Optional: CAPTCHA Solver
@@ -273,7 +377,7 @@ GEMINI_API_KEY=AIzaSy...
 CAPSOLVER_API_KEY=
 ```
 
-> 💡 **Tip for Non-Tech Users**: You only need **`GEMINI_API_KEY`** (which is 100% free from Google AI Studio) plus your **Claude Code CLI** login to have a fully operational auto-apply system!
+> 💡 **Quick Start for Hermes Users**: Put your `DEEPSEEK_API_KEY` (or `NVIDIA_API_KEY` or `GEMINI_API_KEY`) into `.env`. ApplyPilot automatically configures the worker environment to use your key!
 
 ---
 
@@ -415,7 +519,37 @@ This is the safest and most effective way to apply:
 
 ---
 
-### 2. Preview Mode (Dry Run)
+### 2. Running with Hermes Agent (Open Source / Low Cost)
+
+To run with **Hermes Agent** using your preferred model backend:
+
+```bash
+# Using DeepSeek (Default model for Hermes if DEEPSEEK_API_KEY is present)
+applypilot apply --agent hermes --model deepseek-flash --url "https://job-url"
+
+# Using NVIDIA NIM (Nemotron 3.5 Lightning)
+applypilot apply --agent hermes --model nvidia/nemotron-3.5-lightning-30b-a3b --url "https://job-url"
+
+# Using NVIDIA NIM (Moonshot Kimi-K3)
+applypilot apply --agent hermes --model moonshotai/kimi-k3 --url "https://job-url"
+
+# Using Google Gemini
+applypilot apply --agent hermes --model gemini-3.6-flash --url "https://job-url"
+```
+
+---
+
+### 3. Running with Claude Code CLI
+
+To run with **Claude Code CLI** (uses Claude 3.7 / 3.5 Sonnet):
+
+```bash
+applypilot apply --agent claude --model sonnet --url "https://job-url"
+```
+
+---
+
+### 4. Preview Mode (Dry Run)
 Test an application flow without submitting anything:
 ```bash
 applypilot apply --url "https://jobs.lever.co/company/123" --dry-run
@@ -423,7 +557,7 @@ applypilot apply --url "https://jobs.lever.co/company/123" --dry-run
 
 ---
 
-### 3. Fully Autonomous Mode (Auto-Submit)
+### 5. Fully Autonomous Mode (Auto-Submit)
 If you want ApplyPilot to click the final submit button without waiting for you:
 ```bash
 applypilot apply --url "https://jobs.lever.co/company/123" --auto-submit
@@ -431,7 +565,7 @@ applypilot apply --url "https://jobs.lever.co/company/123" --auto-submit
 
 ---
 
-### 4. Running Headless (Invisible Browser)
+### 6. Running Headless (Invisible Browser)
 If you do not want the browser window to pop up on your screen:
 ```bash
 applypilot apply --url "https://jobs.lever.co/company/123" --headless
@@ -504,7 +638,23 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 Then run `.venv\Scripts\Activate.ps1` again.
 
-### 3. "Chrome/Chromium not found"
+### 3. How do I verify Hermes Agent is installed?
+Run in your terminal:
+```bash
+hermes --version
+```
+If not found, install it with:
+```bash
+pip install hermes-agent
+```
+Make sure `DEEPSEEK_API_KEY`, `NVIDIA_API_KEY`, or `GEMINI_API_KEY` is present in your `.env` file.
+
+### 4. "Autonomous Agent CLI not found"
+ApplyPilot requires at least one autonomous agent:
+- Either install **Hermes Agent**: `pip install hermes-agent`
+- Or install **Claude Code CLI**: `npm install -g @anthropic-ai/claude-code` followed by `claude` (to log in).
+
+### 5. "Chrome/Chromium not found"
 Ensure Google Chrome is installed. If Chrome is installed in a non-standard location, set the `CHROME_PATH` environment variable:
 - **macOS**:
   ```bash
@@ -515,15 +665,7 @@ Ensure Google Chrome is installed. If Chrome is installed in a non-standard loca
   $env:CHROME_PATH="C:\Program Files\Google\Chrome\Application\chrome.exe"
   ```
 
-### 4. "Autonomous Agent CLI not found"
-ApplyPilot uses Claude Code CLI (or Hermes Agent) to operate the browser. Install Claude Code:
-```bash
-npm install -g @anthropic-ai/claude-code
-claude
-```
-Complete the one-time authentication in your browser, then exit (`/exit`).
-
-### 5. What if an employer asks for a CAPTCHA or Two-Factor Code (2FA)?
+### 6. What if an employer asks for a CAPTCHA or Two-Factor Code (2FA)?
 ApplyPilot has built-in **Human-in-the-Loop (HITL)** handling. The agent will pause and ask you in the terminal to solve the CAPTCHA or enter the 2FA code in the open Chrome window. Once you complete it, press Enter in the terminal, and ApplyPilot will continue where it left off.
 
 ---
