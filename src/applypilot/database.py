@@ -8,7 +8,9 @@ without migration ordering issues.
 import hashlib
 import json
 import logging
+import os
 import re as _re
+import shutil
 import sqlite3
 import threading
 import time
@@ -1658,8 +1660,68 @@ def get_applied_jobs(conn: sqlite3.Connection | None = None) -> list[dict]:
     return []
 
 
-def export_applied_json(target_path: Path | str | None = None) -> list[dict]:
+def sanitize_url_for_filename(url: str, max_len: int = 240) -> str:
+    """Convert a job URL into a filesystem-safe filename stem.
+
+    Replaces slashes and other unsafe characters while keeping the
+    readable URL value intact. If length exceeds max_len, appends a hash
+    to stay well within filesystem limits (e.g. 255 bytes on APFS).
+    """
+    clean_url = (url or "").strip('“”"\' \t\r\n')
+    # Replace illegal/problematic filesystem characters with underscore
+    safe = _re.sub(r'[/\\:*?"<>|]', '_', clean_url)
+    if len(safe) > max_len:
+        digest = hashlib.md5(clean_url.encode("utf-8")).hexdigest()[:8]
+        safe = safe[: max_len - 9] + "_" + digest
+    return safe
+
+
+def archive_cover_letter(job_url: str, src_path: Path | str | None = None) -> Path | None:
+    """Move cover_letter.pdf to applied_cv/{job_url}.pdf before job is added to applied.json.
+
+    Renames it as the value of joburl without changing the file extension.
+
+    Args:
+        job_url: The application URL for the job.
+        src_path: Optional explicit source path. If None, checks
+            COVER_LETTER_PDF_PATH (/Users/tushar/Documents/intp/ApplyPilot/documents/cover_letter.pdf).
+
+    Returns:
+        The destination Path if moved, or None if source was not found.
+    """
+    from applypilot import config
+    if src_path:
+        src = Path(src_path)
+    else:
+        src = config.COVER_LETTER_PDF_PATH
+
+    if not src.exists():
+        _log.debug("archive_cover_letter: source %s does not exist, nothing to archive for %s", src, job_url)
+        return None
+
+    dest_dir = config.APPLIED_CV_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = sanitize_url_for_filename(job_url)
+    ext = src.suffix or ".pdf"
+    dest = dest_dir / f"{stem}{ext}"
+
+    try:
+        shutil.move(str(src), str(dest))
+        _log.info("Archived cover letter for %s -> %s", job_url, dest)
+        return dest
+    except Exception as e:
+        _log.warning("Could not move cover letter %s to %s: %s", src, dest, e)
+        return None
+
+
+def export_applied_json(target_path: Path | str | None = None,
+                        job_url: str | None = None) -> list[dict]:
     """Export all applied jobs to applied.json with url and date_applied.
+
+    Before writing applied.json, if job_url is provided (or if a job was
+    just applied and cover_letter.pdf exists), archives cover_letter.pdf
+    to applied_cv/ renamed as the job URL.
 
     Writes to target_path if given, otherwise writes to both:
     1. Workspace root / current working directory (applied.json)
@@ -1667,6 +1729,17 @@ def export_applied_json(target_path: Path | str | None = None) -> list[dict]:
 
     Returns the list of exported records.
     """
+    from applypilot import config
+    # Archive cover letter before adding job to applied.json
+    if job_url:
+        archive_cover_letter(job_url)
+    elif config.COVER_LETTER_PDF_PATH.exists():
+        applied_check = get_applied_jobs()
+        if applied_check:
+            top_url = applied_check[0].get("url") or applied_check[0].get("application_url")
+            if top_url:
+                archive_cover_letter(top_url)
+
     applied = get_applied_jobs()
     records = []
     for j in applied:
@@ -1691,10 +1764,12 @@ def export_applied_json(target_path: Path | str | None = None) -> list[dict]:
     if target_path:
         paths_to_write.append(Path(target_path))
     else:
-        # 1. Workspace / current directory
-        paths_to_write.append(Path.cwd() / "applied.json")
-        # 2. Global app directory
-        from applypilot.config import APP_DIR
+        from applypilot.config import APP_DIR, WORKSPACE_DIR
+        default_app_dir = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
+        if APP_DIR == default_app_dir:
+            # 1. Workspace root
+            paths_to_write.append(WORKSPACE_DIR / "applied.json")
+        # 2. Global / configured app directory
         paths_to_write.append(APP_DIR / "applied.json")
 
     for p in paths_to_write:

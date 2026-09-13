@@ -633,6 +633,7 @@ def _build_qa_section(doc_format: str | None = None) -> str:
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False,
+                 stop_before_submit: bool = True,
                  worker_id: int = 0,
                  doc_format: str = "pdf") -> str:
     """Build the full instruction prompt for the apply agent.
@@ -646,6 +647,7 @@ def build_prompt(job: dict, tailored_resume: str,
         tailored_resume: Plain-text content of the tailored resume.
         cover_letter: Optional plain-text cover letter content.
         dry_run: If True, tell the agent not to click Submit.
+        stop_before_submit: If True, fill full form and stop before final submit.
 
     Returns:
         Complete prompt string for the AI agent.
@@ -682,24 +684,82 @@ def build_prompt(job: dict, tailored_resume: str,
     shutil.copy(str(src_doc), str(upload_doc))
     resume_doc_path = str(upload_doc)
 
-    # --- Cover letter handling ---
+    # --- Cover letter handling (Priority 2) ---
     cover_letter_text = cover_letter or ""
     cl_upload_path = ""
     cl_path = job.get("cover_letter_path")
+    if not (cl_path and Path(cl_path).exists()):
+        if config.COVER_LETTER_PDF_PATH.exists():
+            cl_path = str(config.COVER_LETTER_PDF_PATH)
+        else:
+            profile_cl = profile.get("files", {}).get("cover_letter")
+            if profile_cl:
+                resolved_cl = Path(str(profile_cl).replace("~", str(Path.home()))).resolve()
+                if resolved_cl.exists():
+                    cl_path = str(resolved_cl)
+
     if cl_path and Path(cl_path).exists():
         cl_src = Path(cl_path)
-        # Read text from .txt sibling (binary formats aren't readable)
+        # Read text from .txt sibling (binary formats aren't readable) or extract from PDF
         cl_txt = cl_src.with_suffix(".txt")
         if cl_txt.exists():
             cover_letter_text = cl_txt.read_text(encoding="utf-8")
         elif cl_src.suffix == ".txt":
             cover_letter_text = cl_src.read_text(encoding="utf-8")
-        # Upload document in the configured format
+        elif not cover_letter_text and cl_src.suffix.lower() == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(str(cl_src))
+                pages_text = [page.extract_text() for page in reader.pages if page.extract_text()]
+                if pages_text:
+                    cover_letter_text = "\n\n".join(pages_text).strip()
+            except Exception as e:
+                logger.debug("Could not extract text from cover letter file %s: %s", cl_src, e)
+
+        # Upload document in the configured format or original suffix
         cl_doc_src = cl_src.with_suffix(doc_ext)
-        if cl_doc_src.exists():
-            cl_upload = dest_dir / f"{name_slug}_Cover_Letter{doc_ext}"
-            shutil.copy(str(cl_doc_src), str(cl_upload))
-            cl_upload_path = str(cl_upload)
+        if not cl_doc_src.exists():
+            cl_doc_src = cl_src
+        cl_ext = cl_doc_src.suffix or ".pdf"
+        cl_upload = dest_dir / f"{name_slug}_Cover_Letter{cl_ext}"
+        shutil.copy(str(cl_doc_src), str(cl_upload))
+        cl_upload_path = str(cl_upload)
+
+    # --- Other documents handling (Priority 3: other_docs.pdf) ---
+    other_docs_upload_path = ""
+    other_docs_src = None
+    if config.OTHER_DOCS_PDF_PATH.exists():
+        other_docs_src = config.OTHER_DOCS_PDF_PATH
+    else:
+        profile_od = profile.get("files", {}).get("other_documents")
+        if profile_od:
+            resolved_od = Path(str(profile_od).replace("~", str(Path.home()))).resolve()
+            if resolved_od.exists():
+                other_docs_src = resolved_od
+
+    if other_docs_src and other_docs_src.exists():
+        od_upload = dest_dir / f"{name_slug}_Other_Documents{other_docs_src.suffix or '.pdf'}"
+        shutil.copy(str(other_docs_src), str(od_upload))
+        other_docs_upload_path = str(od_upload)
+
+    # --- Priority 4: Specific field-matched remaining documents ---
+    _SPECIFIC_FIELD_LABELS = {
+        "enrollment_certificate": "Certificate of Enrolment / Immatrikulationsbescheinigung (upload to enrollment/student verification fields)",
+        "transcript_of_records": "Transcript of Records / Notenspiegel (upload to grades/transcript/academic record fields)",
+        "visa_work_permit": "Visa / Work Permit / Aufenthaltstitel (upload to visa, work authorization, or residency document fields)",
+        "id_document": "Government-issued ID (upload only if the form explicitly requires ID verification)",
+        "profile_photo": "Profile Photo / Headshot / Foto (upload ONLY if the form explicitly requests a photo)",
+    }
+    handled_doc_keys = {"cover_letter", "other_documents", "cv_pdf"}
+    remaining_files_lines: list[str] = []
+    for key, raw_path in profile.get("files", {}).items():
+        if key in handled_doc_keys or not raw_path:
+            continue
+        resolved = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
+        if resolved.exists():
+            label = _SPECIFIC_FIELD_LABELS.get(key) or key.replace("_", " ").title() + " (upload only if matching field is present)"
+            remaining_files_lines.append(f"  - {label}:\n    {resolved}")
+    remaining_files_block = "\n".join(remaining_files_lines)
 
     # --- Build all prompt sections ---
     profile_summary = _build_profile_summary(profile)
@@ -765,69 +825,58 @@ def build_prompt(job: dict, tailored_resume: str,
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
-    # Optional files (profile photo, certs, ID, etc.)
-    _FILE_LABELS = {
-        "profile_photo": "Profile Photo / Headshot (upload if the form asks for a photo / portrait / Bewerbungsfoto / Profilbild)",
-        "enrollment_certificate": "Certificate of Enrolment / Immatriculation (upload if asked for Immatrikulationsbescheinigung / Studienbescheinigung / Certificate of Enrollment / student status)",
-        "transcript_of_records": "Transcript of Records (upload if asked for Transcript of Records / Notenübersicht / Notenspiegel / academic performance)",
-        "other_documents": "Other Documents / Certificates (upload if asked for additional documents / certificates / Zeugnisse / Arbeitszeugnisse / Anlagen / attachments)",
-        "visa_work_permit": "Visa / Work Permit (upload if asked for work authorization / visa / residence permit / Visum / Aufenthaltstitel)",
-        "id_document": "Government-issued ID (upload only if explicitly required)",
-        "passport": "Passport (upload only if explicitly required)",
-    }
+    # Optional files block maintained for backwards compatibility
+    optional_files_block = remaining_files_block
 
-    def _resolve_file_candidate(raw_path: str, key: str = "") -> Path | None:
-        if raw_path:
-            p = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
-            if p.exists():
-                return p
-            p_app = config.APP_DIR / "files" / p.name
-            if p_app.exists():
-                return p_app
-            p_cwd = Path.cwd() / "documents" / p.name
-            if p_cwd.exists():
-                return p_cwd
-
-        # Fallback search by key keywords
-        for folder in [config.APP_DIR / "files", Path.cwd() / "documents"]:
-            if not folder.exists() or not folder.is_dir():
-                continue
-            for candidate in folder.iterdir():
-                name_low = candidate.name.lower()
-                if key == "profile_photo" and ("photo" in name_low or "prof_img" in name_low or "headshot" in name_low):
-                    return candidate
-                elif key == "enrollment_certificate" and ("enrol" in name_low or "immatrik" in name_low or "studien" in name_low):
-                    return candidate
-                elif key == "transcript_of_records" and ("transcript" in name_low or "noten" in name_low):
-                    return candidate
-                elif key == "other_documents" and ("other" in name_low or "anlage" in name_low or "cert" in name_low or "zeugnis" in name_low):
-                    return candidate
-                elif key in ("visa_work_permit", "id_document") and ("visum" in name_low or "visa" in name_low or "permit" in name_low):
-                    return candidate
-        return None
-
-    files_map = dict(profile.get("files", {}))
-    for std_k in ["profile_photo", "enrollment_certificate", "transcript_of_records", "other_documents", "visa_work_permit"]:
-        if std_k not in files_map:
-            files_map[std_k] = ""
-
-    optional_files_lines: list[str] = []
-    seen_file_paths = set()
-    for key, raw_path in files_map.items():
-        resolved = _resolve_file_candidate(raw_path, key=key)
-        if resolved and resolved.exists() and str(resolved) not in seen_file_paths:
-            seen_file_paths.add(str(resolved))
-            label = _FILE_LABELS.get(key) or key.replace("_", " ").title() + " (upload if asked)"
-            optional_files_lines.append(f"{label}: {resolved}")
-    optional_files_block = "\n".join(optional_files_lines)
-
-    # Never submit on your own in any case — complete until the last step:
-    submit_instruction = (
-        "CRITICAL SAFETY RULE: Do NOT click the final Submit / Apply / Absenden button under ANY circumstances. "
-        "Complete all fields, fill in all answers, upload the tailored resume/cover letter, and navigate up to the final review/submit step. "
-        "Review and verify all fields on the page. Leave the completed form open for the user to review and submit manually. "
-        "Then output RESULT:APPLIED with a note that the application has been filled completely and is ready for manual submission."
-    )
+    # Stop-before-submit or dry-run: override submit instruction
+    should_stop = bool(stop_before_submit or dry_run)
+    if should_stop:
+        submit_instruction = (
+            "CRITICAL: STOP BEFORE APPLYING. DO NOT click the final Submit/Apply/Bewerbung absenden button under any circumstances.\n"
+            "Your job is to ONLY FILL THE FULL FORM completely and accurately:\n"
+            "   - Navigate through multi-page forms (click Next / Continue / Save and Continue) until you reach the FINAL review/submission page.\n"
+            "   - Fill every single field, dropdown, radio button, and checkbox (including GDPR/privacy consent).\n"
+            "   - Upload the tailored resume and cover letter and any required documents.\n"
+            "   - Take a final snapshot on the review page to verify all fields are filled.\n"
+            "   - STOP immediately right before clicking Submit. Leave Chrome open on this page.\n"
+            "   - Output RESULT:REVIEW_READY (or RESULT:REVIEW_READY:{{current_page_url}}) and stop. The human user will take the final step to submit."
+        )
+        post_submit_instruction = (
+            "Form filling complete! Keep Chrome and the application tab open on the final review page.\n"
+            "    - Do NOT look for a confirmation/thank-you page because you did NOT submit.\n"
+            "    - Confirm all fields are filled on the review page, then proceed to output your result."
+        )
+        mission_statement = (
+            "Your ONE mission: get this candidate an interview by accurately filling out the ENTIRE application form. "
+            "You have all information and tools. Fill all fields, navigate all pages up to the final review/submit step, but STOP BEFORE APPLYING. "
+            "The human user will review and take the final step to submit."
+        )
+        mission_goal = (
+            "Fill out the complete, accurate application up to the final review/submit page. "
+            "Do NOT click the final Submit/Apply button. Stop before submitting — the user will take the last step."
+        )
+    else:
+        submit_instruction = (
+            "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. "
+            "Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, "
+            "work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. "
+            "Only click Submit after confirming everything is correct."
+        )
+        post_submit_instruction = (
+            "After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. "
+            "If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). "
+            "Snapshot to confirm submission. Look for \"thank you\" or \"application received\".\n"
+            "    - Keep Chrome and the application tab open so the user can verify the completed application. Do NOT close Chrome or close tabs."
+        )
+        mission_statement = (
+            "Your ONE mission: get this candidate an interview. You have all the information and tools. "
+            "Think strategically. Act decisively. Submit the application."
+        )
+        mission_goal = (
+            "Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.\n\n"
+            "If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. "
+            "Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal."
+        )
 
     # Look up the per-ATS successful-path memo. If present, the prompt
     # gets a "PRIOR SUCCESSFUL PATH" section that summarizes the tool-call
@@ -840,7 +889,7 @@ def build_prompt(job: dict, tailored_resume: str,
     prior_path_block = format_path_for_prompt(load_path(_ats_slug)) if _ats_slug else None
     prior_path_section = (prior_path_block + "\n\n") if prior_path_block else ""
 
-    prompt = f"""You are an autonomous job application agent. Your mission: fill out this candidate's application completely and accurately up to the final step. Think strategically. Act decisively. Complete the application form, but NEVER click final Submit on your own.
+    prompt = f"""You are an autonomous job application agent. {mission_statement}
 
 IMPORTANT: You are running on a REAL computer with FULL filesystem access. You are NOT in a sandbox. You CAN read/write files, upload documents, and access the local filesystem. The resume and cover letter paths below are real files on disk — use them directly.
 
@@ -850,10 +899,18 @@ Title: {job['title']}
 Company: {job.get('site', 'Unknown')}
 Fit Score: {job.get('fit_score', 'N/A')}/10
 
-== FILES ==
-Resume {doc_format.upper()} (upload this): {resume_doc_path}
-Cover Letter {doc_format.upper()} (upload if asked): {cl_upload_path or "N/A"}
-{optional_files_block}
+== FILES & DOCUMENT UPLOAD HIERARCHY ==
+PRIORITY 1 -- RESUME / CV (upload to Resume / CV / Lebenslauf fields):
+  {resume_doc_path}
+
+PRIORITY 2 -- COVER LETTER (upload to Cover Letter / Anschreiben / Motivationsschreiben fields):
+  {cl_upload_path or "N/A"}
+
+PRIORITY 3 -- OTHER DOCUMENTS (upload to Other Documents / Weitere Dokumente / Additional Documents / Zeugnisse / Zertifikate / Anlagen / general attachment fields):
+  {other_docs_upload_path or "N/A"}
+
+PRIORITY 4 -- REMAINING DOCUMENTS (upload ONLY according to the specific matching field):
+{remaining_files_block or "  (None configured)"}
 
 == RESUME TEXT (use when filling text fields) ==
 {tailored_resume}
@@ -865,9 +922,7 @@ Cover Letter {doc_format.upper()} (upload if asked): {cl_upload_path or "N/A"}
 {profile_summary}
 
 {prior_path_section}== YOUR MISSION ==
-Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.
-
-If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal.
+{mission_goal}
 
 {hard_rules}
 
@@ -975,6 +1030,18 @@ Then output RESULT:NEEDS_HUMAN:screening_questions:{{current_page_url}}
 
 The pipeline operator will provide answers. The agent will be relaunched with your answers
 in the KNOWN SCREENING ANSWERS section. The form will still be open in the browser.
+
+== DOCUMENT UPLOAD PRIORITY & RULES ==
+When uploading documents on any application form, strictly follow this priority order:
+1. RESUME / CV (Lebenslauf): Priority 1. Always upload the tailored resume to the Resume/CV/Lebenslauf field. Delete any pre-existing resume first.
+2. COVER LETTER (Anschreiben / Motivationsschreiben): Priority 2. Upload the cover letter {doc_format.upper()} to the Cover Letter/Anschreiben field (or paste the cover letter text if it is a text field/textarea).
+3. OTHER DOCS (other_docs.pdf / Weitere Dokumente / Additional Documents / Zeugnisse / Zertifikate / Anlagen): Priority 3. Upload to general attachment fields, "Other Documents", "Weitere Dokumente", "Work Samples", or "Zeugnisse/Zertifikate" fields.
+4. REMAINING DOCUMENTS: Upload according to the specific field requesting them:
+   - "Immatrikulationsbescheinigung" / "Certificate of Enrollment" -> Upload the Certificate of Enrolment PDF.
+   - "Notenspiegel" / "Transcript of Records" / "Academic Transcripts" -> Upload the Transcript of Records PDF.
+   - "Aufenthaltstitel" / "Visum" / "Work Permit" / "Residence Permit" -> Upload the Visa / Work Permit PDF.
+   - "Profilbild" / "Foto" / "Photo" -> Upload the Profile Photo only if explicitly requested.
+Never mix up these files. Only upload Priority 4 files when the form explicitly provides a field dedicated to that specific document.
 
 == STEP-BY-STEP ==
 1. browser_navigate to the job URL.
@@ -1098,27 +1165,25 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
        - SMS/text verification: You CANNOT receive SMS codes. If the site ONLY offers phone/SMS verification with NO email option visible, output RESULT:NEEDS_HUMAN:sms_verification:{{current_page_url}} immediately.
    5i. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5j. All failed? Output RESULT:FAILED:login_issue. Do not loop.
-6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the {doc_format.upper()} path above. This is the tailored resume for THIS job. Non-negotiable.
-7. Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter {doc_format.upper()} path.
-7a. Upload supporting documents and profile photo whenever requested by the application (using the exact paths listed in the == FILES == section above):
-    - Profile photo / picture / Bewerbungsfoto / Profilbild -> browser_file_upload with the Profile Photo path.
-    - Certificate of enrolment / Immatrikulationsbescheinigung / Studienbescheinigung / current student status proof -> browser_file_upload with the Certificate of Enrolment path. (Crucial for Werkstudent / working student applications!)
-    - Transcript of records / Notenspiegel / Notenübersicht / grade sheet -> browser_file_upload with the Transcript of Records path.
-    - Additional documents / Zeugnisse / Arbeitszeugnisse / Zertifikate / Anlagen / other documents -> browser_file_upload with the Other Documents path.
-    - Visa / work permit / residence permit / Aufenthaltstitel -> browser_file_upload with the Visa / Work Permit path.
-    - If the application form has an upload field, file dropzone, or attach button for any of these, ALWAYS upload the matching document. Do not leave required or optional document upload sections empty when a matching file is provided!
-8. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
+6. DOCUMENT UPLOADS — Follow the strict priority order:
+   6a. Priority 1 (Resume / CV / Lebenslauf): ALWAYS upload fresh tailored resume -- delete any existing resume first, then browser_file_upload with the {doc_format.upper()} path above. This is the tailored resume for THIS job. Non-negotiable.
+   6b. Priority 2 (Cover Letter / Anschreiben): Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter {doc_format.upper()} path.
+   6c. Priority 3 (Other Docs / Weitere Dokumente / Zeugnisse / Anlagen): Upload other_docs.pdf if there is a general attachment/other documents/certificates field.
+   6d. Priority 4 (Remaining Documents): Upload enrollment certificate, transcript of records, or visa only if the form has a dedicated field for them.
+7. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
    - "Current Job Title" or "Most Recent Title" -> use the title from the TAILORED RESUME summary, NOT whatever the parser guessed.
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
-9. Answer screening questions using the rules above.
-10. {submit_instruction}
-11. Leave the form at the final review step. Do NOT click Submit/Absenden. Keep Chrome and the application tab open so the user can verify the completed application and submit it manually. Do NOT close Chrome or close tabs.
-12. Output your result: output RESULT:APPLIED once all fields are filled and the form is ready for the user.
+8. Answer screening questions using the rules above.
+9. {submit_instruction}
+10. {post_submit_instruction}
+11. Output your result.
 
 == CRITICAL: YOU MUST OUTPUT A RESULT CODE ==
-Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If you submitted the form, output RESULT:APPLIED. If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.
+Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If all fields are filled and form is on the final review page, output RESULT:REVIEW_READY (or RESULT:APPLIED if submitting). If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.
 
 == RESULT CODES (output EXACTLY one) ==
+RESULT:REVIEW_READY -- form is fully filled and ready on final review/submit page; user will review and take the final step to submit
+RESULT:REVIEW_READY:{{url}} -- form is fully filled and ready on final review/submit page at {{url}}
 RESULT:APPLIED -- submitted successfully
 RESULT:ALREADY_APPLIED -- job was already applied to previously; no re-submission possible
 RESULT:EXPIRED -- job closed or no longer accepting applications

@@ -50,4 +50,5 @@ def test_acquire_job_target_url_resets_previous_status(tmp_db):
     job = acquire_job(target_url=test_url, worker_id=0)
     assert job is not None
     assert job["url"] == test_url
-    assert job["apply_status"] != "failed"
+    row = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (test_url,)).fetchone()
+    assert row[0] == "in_progress"

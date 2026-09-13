@@ -32,6 +32,8 @@ def tmp_db(tmp_path, monkeypatch):
     db_file = tmp_path / "applypilot.db"
     monkeypatch.setattr(config, "DB_PATH", db_file)
     monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    monkeypatch.setattr(config, "COVER_LETTER_PDF_PATH", tmp_path / "documents" / "cover_letter.pdf")
+    monkeypatch.setattr(config, "APPLIED_CV_DIR", tmp_path / "applied_cv")
     # database.DB_PATH is imported by-name at module load, so patching only
     # config.DB_PATH leaves database.DB_PATH pointing at the real DB.
     monkeypatch.setattr(database, "DB_PATH", db_file)

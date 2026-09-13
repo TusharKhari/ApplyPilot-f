@@ -85,7 +85,8 @@ def apply(
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Autonomous agent backend: hermes (default if installed) or claude."),
     model: str = typer.Option("sonnet", "--model", "-m", help="Agent model name (nvidia/nemotron-3.5-lightning-30b-a3b, moonshotai/kimi-k3, or deepseek-flash for Hermes, sonnet for Claude)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
-    dry_run: bool = typer.Option(True, "--dry-run/--submit", help="Fill application until the last step without submitting (default: True)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
+    stop_before_submit: bool = typer.Option(True, "--stop-before-submit/--auto-submit", help="Fill full form and stop before final submission for human review and submit (default: True)."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
@@ -261,6 +262,7 @@ def apply(
     console.print(f"  Workers:  {workers}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
+    console.print(f"  Stop before submit: {stop_before_submit or dry_run}")
     if fresh_sessions:
         console.print("  Sessions: [yellow]refreshing from real Chrome profile[/yellow]")
     if url:
@@ -276,6 +278,7 @@ def apply(
         headless=headless,
         model=model,
         dry_run=dry_run,
+        stop_before_submit=stop_before_submit,
         continuous=continuous,
         workers=workers,
         fresh_sessions=fresh_sessions,
