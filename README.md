@@ -296,7 +296,7 @@ ApplyPilot supports two autonomous browser agent engines: **Hermes Agent** and *
 | **Subscription Required?** | ❌ No subscription required | ✅ Requires Anthropic account / subscription |
 | **Default Models** | `deepseek-flash`<br>`nvidia/nemotron-3.5-lightning-30b-a3b`<br>`gemini-3.6-flash` | `sonnet` (Claude 3.7/3.5 Sonnet) |
 | **Supported API Keys** | `DEEPSEEK_API_KEY`, `NVIDIA_API_KEY`, `GEMINI_API_KEY` | Anthropic browser login / Max plan |
-| **Average Cost per Job** | ~$0.001 - $0.01 (or free tier) | Included in subscription plan |
+| **Average Cost per Job** | ~$0.04 (or free tier) | Included in subscription plan |
 
 ### How to Switch Between Agents
 
