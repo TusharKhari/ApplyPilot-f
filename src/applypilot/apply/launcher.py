@@ -864,11 +864,21 @@ def _start_worker_listener(worker_id: int, no_hitl: bool = False) -> int:
                 conn = get_connection()
                 now = datetime.now(tz.utc).isoformat()
                 if action == "applied":
+                    try:
+                        from applypilot.database import archive_cover_letter
+                        archive_cover_letter(url)
+                    except Exception as e:
+                        logger.debug("archive_cover_letter failed for %s: %s", url, e)
                     conn.execute("""UPDATE jobs SET apply_status='applied', applied_at=?,
                         apply_category='applied', apply_attempts=COALESCE(apply_attempts,0)+1
                         WHERE url=?""", (now, url))
                     transition_state(conn, url, "applied",
                         reason="HTTP handler mark", force=True)
+                    try:
+                        from applypilot.database import export_applied_json
+                        export_applied_json(job_url=url)
+                    except Exception:
+                        pass
                 elif action == "skip":
                     conn.execute("""UPDATE jobs SET apply_status='failed',
                         apply_category='archived_ineligible',
@@ -1993,6 +2003,11 @@ def mark_result(url: str, status: str, error: str | None = None,
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
+        try:
+            from applypilot.database import archive_cover_letter
+            archive_cover_letter(url)
+        except Exception as e:
+            logger.debug("archive_cover_letter failed for %s: %s", url, e)
         _db_retry_execute(conn, """
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
@@ -2006,7 +2021,7 @@ def mark_result(url: str, status: str, error: str | None = None,
                          force=True)
         try:
             from applypilot.database import export_applied_json
-            export_applied_json()
+            export_applied_json(job_url=url)
         except Exception:
             pass
     else:
@@ -2105,12 +2120,22 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
+        try:
+            from applypilot.database import archive_cover_letter
+            archive_cover_letter(url)
+        except Exception as e:
+            logger.debug("archive_cover_letter failed for %s: %s", url, e)
         _db_retry_execute(conn, """
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
                            apply_category = 'applied'
             WHERE url = ?
         """, (now, url))
+        try:
+            from applypilot.database import export_applied_json
+            export_applied_json(job_url=url)
+        except Exception:
+            pass
     else:
         error = reason or "manual"
         category = categorize_apply_result("failed", error)

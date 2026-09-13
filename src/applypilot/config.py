@@ -29,6 +29,13 @@ SESSIONS_DIR = APP_DIR / "chrome-sessions"
 # Optional documents (profile photo, certs, ID, etc.)
 FILES_DIR = APP_DIR / "files"
 
+# Workspace & application document paths
+WORKSPACE_DIR = Path(os.environ.get("APPLYPILOT_WORKSPACE", Path(__file__).resolve().parent.parent.parent))
+DOCUMENTS_DIR = WORKSPACE_DIR / "documents"
+APPLIED_CV_DIR = WORKSPACE_DIR / "applied_cv"
+COVER_LETTER_PDF_PATH = DOCUMENTS_DIR / "cover_letter.pdf"
+OTHER_DOCS_PDF_PATH = DOCUMENTS_DIR / "other_docs.pdf"
+
 # Package-shipped config (YAML registries)
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / "config"
@@ -103,18 +110,21 @@ def get_chrome_user_data() -> Path:
 
 def ensure_dirs():
     """Create all required directories."""
-    for d in [APP_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, SESSIONS_DIR, FILES_DIR]:
+    for d in [APP_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, SESSIONS_DIR, FILES_DIR, APPLIED_CV_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
 def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
+    """Load user profile from ~/.applypilot/profile.json or workspace profile.json."""
     import json
-    if not PROFILE_PATH.exists():
-        raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
-        )
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    if PROFILE_PATH.exists():
+        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    ws_profile = WORKSPACE_DIR / "profile.json"
+    if ws_profile.exists():
+        return json.loads(ws_profile.read_text(encoding="utf-8"))
+    raise FileNotFoundError(
+        f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
+    )
 
 
 def load_search_config() -> dict:

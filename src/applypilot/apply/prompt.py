@@ -686,24 +686,82 @@ def build_prompt(job: dict, tailored_resume: str,
     shutil.copy(str(src_doc), str(upload_doc))
     resume_doc_path = str(upload_doc)
 
-    # --- Cover letter handling ---
+    # --- Cover letter handling (Priority 2) ---
     cover_letter_text = cover_letter or ""
     cl_upload_path = ""
     cl_path = job.get("cover_letter_path")
+    if not (cl_path and Path(cl_path).exists()):
+        if config.COVER_LETTER_PDF_PATH.exists():
+            cl_path = str(config.COVER_LETTER_PDF_PATH)
+        else:
+            profile_cl = profile.get("files", {}).get("cover_letter")
+            if profile_cl:
+                resolved_cl = Path(str(profile_cl).replace("~", str(Path.home()))).resolve()
+                if resolved_cl.exists():
+                    cl_path = str(resolved_cl)
+
     if cl_path and Path(cl_path).exists():
         cl_src = Path(cl_path)
-        # Read text from .txt sibling (binary formats aren't readable)
+        # Read text from .txt sibling (binary formats aren't readable) or extract from PDF
         cl_txt = cl_src.with_suffix(".txt")
         if cl_txt.exists():
             cover_letter_text = cl_txt.read_text(encoding="utf-8")
         elif cl_src.suffix == ".txt":
             cover_letter_text = cl_src.read_text(encoding="utf-8")
-        # Upload document in the configured format
+        elif not cover_letter_text and cl_src.suffix.lower() == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(str(cl_src))
+                pages_text = [page.extract_text() for page in reader.pages if page.extract_text()]
+                if pages_text:
+                    cover_letter_text = "\n\n".join(pages_text).strip()
+            except Exception as e:
+                logger.debug("Could not extract text from cover letter file %s: %s", cl_src, e)
+
+        # Upload document in the configured format or original suffix
         cl_doc_src = cl_src.with_suffix(doc_ext)
-        if cl_doc_src.exists():
-            cl_upload = dest_dir / f"{name_slug}_Cover_Letter{doc_ext}"
-            shutil.copy(str(cl_doc_src), str(cl_upload))
-            cl_upload_path = str(cl_upload)
+        if not cl_doc_src.exists():
+            cl_doc_src = cl_src
+        cl_ext = cl_doc_src.suffix or ".pdf"
+        cl_upload = dest_dir / f"{name_slug}_Cover_Letter{cl_ext}"
+        shutil.copy(str(cl_doc_src), str(cl_upload))
+        cl_upload_path = str(cl_upload)
+
+    # --- Other documents handling (Priority 3: other_docs.pdf) ---
+    other_docs_upload_path = ""
+    other_docs_src = None
+    if config.OTHER_DOCS_PDF_PATH.exists():
+        other_docs_src = config.OTHER_DOCS_PDF_PATH
+    else:
+        profile_od = profile.get("files", {}).get("other_documents")
+        if profile_od:
+            resolved_od = Path(str(profile_od).replace("~", str(Path.home()))).resolve()
+            if resolved_od.exists():
+                other_docs_src = resolved_od
+
+    if other_docs_src and other_docs_src.exists():
+        od_upload = dest_dir / f"{name_slug}_Other_Documents{other_docs_src.suffix or '.pdf'}"
+        shutil.copy(str(other_docs_src), str(od_upload))
+        other_docs_upload_path = str(od_upload)
+
+    # --- Priority 4: Specific field-matched remaining documents ---
+    _SPECIFIC_FIELD_LABELS = {
+        "enrollment_certificate": "Certificate of Enrolment / Immatrikulationsbescheinigung (upload to enrollment/student verification fields)",
+        "transcript_of_records": "Transcript of Records / Notenspiegel (upload to grades/transcript/academic record fields)",
+        "visa_work_permit": "Visa / Work Permit / Aufenthaltstitel (upload to visa, work authorization, or residency document fields)",
+        "id_document": "Government-issued ID (upload only if the form explicitly requires ID verification)",
+        "profile_photo": "Profile Photo / Headshot / Foto (upload ONLY if the form explicitly requests a photo)",
+    }
+    handled_doc_keys = {"cover_letter", "other_documents", "cv_pdf"}
+    remaining_files_lines: list[str] = []
+    for key, raw_path in profile.get("files", {}).items():
+        if key in handled_doc_keys or not raw_path:
+            continue
+        resolved = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
+        if resolved.exists():
+            label = _SPECIFIC_FIELD_LABELS.get(key) or key.replace("_", " ").title() + " (upload only if matching field is present)"
+            remaining_files_lines.append(f"  - {label}:\n    {resolved}")
+    remaining_files_block = "\n".join(remaining_files_lines)
 
     # --- Build all prompt sections ---
     profile_summary = _build_profile_summary(profile)
@@ -769,21 +827,8 @@ def build_prompt(job: dict, tailored_resume: str,
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
-    # Optional files (profile photo, certs, ID, etc.)
-    _FILE_LABELS = {
-        "profile_photo": "Profile Photo / Headshot (upload if the form asks for a photo)",
-        "id_document": "Government-issued ID (upload only if the form explicitly requires ID verification)",
-        "passport": "Passport (upload only if the form explicitly requires a passport)",
-    }
-    optional_files_lines: list[str] = []
-    for key, raw_path in profile.get("files", {}).items():
-        if not raw_path:
-            continue
-        resolved = Path(str(raw_path).replace("~", str(Path.home()))).resolve()
-        if resolved.exists():
-            label = _FILE_LABELS.get(key) or key.replace("_", " ").title() + " (upload if asked)"
-            optional_files_lines.append(f"{label}: {resolved}")
-    optional_files_block = "\n".join(optional_files_lines)
+    # Optional files block maintained for backwards compatibility
+    optional_files_block = remaining_files_block
 
     # Stop-before-submit or dry-run: override submit instruction
     should_stop = bool(stop_before_submit or dry_run)
@@ -856,10 +901,18 @@ Title: {job['title']}
 Company: {job.get('site', 'Unknown')}
 Fit Score: {job.get('fit_score', 'N/A')}/10
 
-== FILES ==
-Resume {doc_format.upper()} (upload this): {resume_doc_path}
-Cover Letter {doc_format.upper()} (upload if asked): {cl_upload_path or "N/A"}
-{optional_files_block}
+== FILES & DOCUMENT UPLOAD HIERARCHY ==
+PRIORITY 1 -- RESUME / CV (upload to Resume / CV / Lebenslauf fields):
+  {resume_doc_path}
+
+PRIORITY 2 -- COVER LETTER (upload to Cover Letter / Anschreiben / Motivationsschreiben fields):
+  {cl_upload_path or "N/A"}
+
+PRIORITY 3 -- OTHER DOCUMENTS (upload to Other Documents / Weitere Dokumente / Additional Documents / Zeugnisse / Zertifikate / Anlagen / general attachment fields):
+  {other_docs_upload_path or "N/A"}
+
+PRIORITY 4 -- REMAINING DOCUMENTS (upload ONLY according to the specific matching field):
+{remaining_files_block or "  (None configured)"}
 
 == RESUME TEXT (use when filling text fields) ==
 {tailored_resume}
@@ -979,6 +1032,18 @@ Then output RESULT:NEEDS_HUMAN:screening_questions:{{current_page_url}}
 
 The pipeline operator will provide answers. The agent will be relaunched with your answers
 in the KNOWN SCREENING ANSWERS section. The form will still be open in the browser.
+
+== DOCUMENT UPLOAD PRIORITY & RULES ==
+When uploading documents on any application form, strictly follow this priority order:
+1. RESUME / CV (Lebenslauf): Priority 1. Always upload the tailored resume to the Resume/CV/Lebenslauf field. Delete any pre-existing resume first.
+2. COVER LETTER (Anschreiben / Motivationsschreiben): Priority 2. Upload the cover letter {doc_format.upper()} to the Cover Letter/Anschreiben field (or paste the cover letter text if it is a text field/textarea).
+3. OTHER DOCS (other_docs.pdf / Weitere Dokumente / Additional Documents / Zeugnisse / Zertifikate / Anlagen): Priority 3. Upload to general attachment fields, "Other Documents", "Weitere Dokumente", "Work Samples", or "Zeugnisse/Zertifikate" fields.
+4. REMAINING DOCUMENTS: Upload according to the specific field requesting them:
+   - "Immatrikulationsbescheinigung" / "Certificate of Enrollment" -> Upload the Certificate of Enrolment PDF.
+   - "Notenspiegel" / "Transcript of Records" / "Academic Transcripts" -> Upload the Transcript of Records PDF.
+   - "Aufenthaltstitel" / "Visum" / "Work Permit" / "Residence Permit" -> Upload the Visa / Work Permit PDF.
+   - "Profilbild" / "Foto" / "Photo" -> Upload the Profile Photo only if explicitly requested.
+Never mix up these files. Only upload Priority 4 files when the form explicitly provides a field dedicated to that specific document.
 
 == STEP-BY-STEP ==
 1. browser_navigate to the job URL.
@@ -1102,15 +1167,18 @@ in the KNOWN SCREENING ANSWERS section. The form will still be open in the brows
        - SMS/text verification: You CANNOT receive SMS codes. If the site ONLY offers phone/SMS verification with NO email option visible, output RESULT:NEEDS_HUMAN:sms_verification:{{current_page_url}} immediately.
    5i. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5j. All failed? Output RESULT:FAILED:login_issue. Do not loop.
-6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the {doc_format.upper()} path above. This is the tailored resume for THIS job. Non-negotiable.
-7. Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter {doc_format.upper()} path.
-8. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
+6. DOCUMENT UPLOADS — Follow the strict priority order:
+   6a. Priority 1 (Resume / CV / Lebenslauf): ALWAYS upload fresh tailored resume -- delete any existing resume first, then browser_file_upload with the {doc_format.upper()} path above. This is the tailored resume for THIS job. Non-negotiable.
+   6b. Priority 2 (Cover Letter / Anschreiben): Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter {doc_format.upper()} path.
+   6c. Priority 3 (Other Docs / Weitere Dokumente / Zeugnisse / Anlagen): Upload other_docs.pdf if there is a general attachment/other documents/certificates field.
+   6d. Priority 4 (Remaining Documents): Upload enrollment certificate, transcript of records, or visa only if the form has a dedicated field for them.
+7. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
    - "Current Job Title" or "Most Recent Title" -> use the title from the TAILORED RESUME summary, NOT whatever the parser guessed.
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
-9. Answer screening questions using the rules above.
-10. {submit_instruction}
-11. {post_submit_instruction}
-12. Output your result.
+8. Answer screening questions using the rules above.
+9. {submit_instruction}
+10. {post_submit_instruction}
+11. Output your result.
 
 == CRITICAL: YOU MUST OUTPUT A RESULT CODE ==
 Your VERY LAST message MUST contain exactly one RESULT: line from below. This is NON-NEGOTIABLE. Every response you give MUST end with a RESULT line. If all fields are filled and form is on the final review page, output RESULT:REVIEW_READY (or RESULT:APPLIED if submitting). If something went wrong, output the appropriate RESULT:FAILED:reason. If you are about to summarize your work or give a recommendation, you STILL must end with a RESULT line. NEVER end without a RESULT line — doing so is a bug in YOUR behavior.
