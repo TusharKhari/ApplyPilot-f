@@ -1,4 +1,4 @@
-# ApplyPilot 🚀
+# ApplyPilot (AI Agent With Human in the Loop) 🚀
 
 **Autonomous, AI-Powered Job Application Assistant & Form Filler. Open Source.**
 
