@@ -29,7 +29,8 @@ Previously provided for a Rheinmetall Werkstudent application:
 These dates and availability details were application-specific to the Rheinmetall application unless I explicitly confirm otherwise. If a future application asks for current availability and the dates may no longer be valid, ask me before using them.
 Compensation
 Previously provided for Rheinmetall:
-* Expected wage: 14 €/Stunde
+* Expected wage: 14 €/Stunde, Yearly Salary: 51,000 €
+
 This is application-specific unless I explicitly confirm that it is my general salary expectation.
 Skills
 Previously entered for Rheinmetall:

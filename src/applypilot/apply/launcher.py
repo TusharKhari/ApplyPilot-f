@@ -1534,7 +1534,7 @@ def _make_mcp_config(cdp_port: int, worker_id: int = 0) -> dict:
 
 
 def _write_hermes_worker_config(worker_id: int, cdp_port: int,
-                                model: str = "deepseek-flash",
+                                model: str = "deepseek-v4-pro",
                                 base_dir: Path | None = None,
                                 provider: str | None = None) -> Path:
     """Write isolated Hermes config and credentials for a worker.
@@ -1559,7 +1559,9 @@ def _write_hermes_worker_config(worker_id: int, cdp_port: int,
             provider = inferred
         elif inferred in ("gemini", "google"):
             provider = "google"
-        elif os.environ.get("NVIDIA_API_KEY") and not os.environ.get("DEEPSEEK_API_KEY"):
+        elif os.environ.get("DEEPSEEK_API_KEY"):
+            provider = "deepseek"
+        elif os.environ.get("NVIDIA_API_KEY"):
             provider = "nvidia"
         elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
             provider = "google"
@@ -1578,6 +1580,11 @@ def _write_hermes_worker_config(worker_id: int, cdp_port: int,
         "model": model_cfg,
         "agent": {
             "disabled_toolsets": ["browser"],
+        },
+        "tools": {
+            "tool_search": {
+                "enabled": "off",
+            },
         },
         "mcp_servers": {
             "playwright": {
@@ -2385,12 +2392,14 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             env_model = os.environ.get("LLM_MODEL", "")
             if env_model:
                 hermes_model = _normalize_model_name(env_model)
+            elif os.environ.get("DEEPSEEK_API_KEY"):
+                hermes_model = "deepseek-v4-pro"
             elif os.environ.get("NVIDIA_API_KEY"):
                 hermes_model = "nvidia/nemotron-3.5-lightning-30b-a3b"
             elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
                 hermes_model = "gemini-3.6-flash"
             else:
-                hermes_model = "deepseek-flash"
+                hermes_model = "deepseek-v4-pro"
         else:
             hermes_model = _normalize_model_name(model)
         worker_hermes_dir = _write_hermes_worker_config(worker_id, port, model=hermes_model)
@@ -2539,9 +2548,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     break
                 try:
                     msg = json.loads(line)
+                    if not isinstance(msg, dict):
+                        raise ValueError("JSON line is not an object")
                     msg_type = msg.get("type")
                     if msg_type == "assistant":
-                        for block in msg.get("message", {}).get("content", []):
+                        msg_data = msg.get("message")
+                        content_blocks = msg_data.get("content", []) if isinstance(msg_data, dict) else []
+                        for block in content_blocks:
                             bt = block.get("type")
                             if bt == "text":
                                 text_parts.append(block["text"])
@@ -2593,7 +2606,9 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                         # browser_snapshot etc. — the dumps would dwarf the log.
                         # We DO log gmail results (so we know whether the agent
                         # actually read an email) and any tool errors.
-                        for block in msg.get("message", {}).get("content", []):
+                        msg_data = msg.get("message")
+                        content_blocks = msg_data.get("content", []) if isinstance(msg_data, dict) else []
+                        for block in content_blocks:
                             if block.get("type") != "tool_result":
                                 continue
                             tu_id = block.get("tool_use_id", "")

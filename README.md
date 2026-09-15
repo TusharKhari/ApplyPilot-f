@@ -31,7 +31,14 @@ ApplyPilot takes the tedious, repetitive pain out of job hunting. Powered by mod
   - [4. Preview Mode (Dry Run)](#4-preview-mode-dry-run)
   - [5. Fully Autonomous Mode (Auto-Submit)](#5-fully-autonomous-mode-auto-submit)
   - [6. Inspect Agent Prompts (--gen)](#6-inspect-agent-prompts---gen)
-- [Useful Commands (Tracking, Q&A, Credentials)](#useful-commands-tracking-qa-credentials)
+- [Complete CLI Command Reference](#complete-cli-command-reference)
+  - [Overview of All Commands](#overview-of-all-commands)
+  - [1. applypilot apply (Core Automation Engine)](#1-applypilot-apply-core-automation-engine)
+  - [2. applypilot status (Pipeline Analytics)](#2-applypilot-status-pipeline-analytics)
+  - [3. applypilot applied (Export & View Submissions)](#3-applypilot-applied-export--view-submissions)
+  - [4. applypilot qa (Screening Questions Knowledge Base)](#4-applypilot-qa-screening-questions-knowledge-base)
+  - [5. applypilot creds (Portal Credentials Manager)](#5-applypilot-creds-portal-credentials-manager)
+  - [Global Flags & Keyboard Controls](#global-flags--keyboard-controls)
 - [Troubleshooting & FAQs](#troubleshooting--faqs)
 - [License](#license)
 
@@ -573,53 +580,255 @@ applypilot apply --url "https://jobs.lever.co/company/123" --headless
 
 ---
 
-## Useful Commands (Tracking, Q&A, Credentials)
+## Complete CLI Command Reference
 
-### View All Applied Applications
-Shows all jobs applied to and refreshes `applied.json`:
+ApplyPilot provides a full-featured Command Line Interface built with Typer and Rich.
+
+### Overview of All Commands
+
+| Command | Subcommand | Purpose |
+|---------|------------|---------|
+| `applypilot apply` | *(none)* | Launch browser automation to fill and submit job applications. |
+| `applypilot status` | *(none)* | Display detailed pipeline metrics, score funnels, and state distribution. |
+| `applypilot applied` | *(none)* | Display all submitted applications and export records to `applied.json`. |
+| `applypilot qa` | `list` | Show stored screening question-and-answer pairs from past runs. |
+| | `stats` | Display statistics on Q&A pairs, outcomes, and ATS sources. |
+| | `export` | Export Q&A knowledge base to a YAML file for bulk editing. |
+| | `import` | Import Q&A pairs from a YAML file. |
+| `applypilot creds` | `list` | List saved ATS/portal credentials (passwords masked by default). |
+| | `show` | Show full, unmasked login details for a single domain. |
+| | `add` | Add or update credentials for a specific company or ATS portal. |
+| | `set` | Update specific fields (email, password, notes) for an existing entry. |
+| | `import-logs` | Automatically mine credentials created during past application runs from logs. |
+| | `delete` | Remove saved credentials for a domain. |
+
+---
+
+### 1. `applypilot apply` (Core Automation Engine)
+
+Launch autonomous browser workers to fill and submit job applications.
+
 ```bash
-applypilot applied
+applypilot apply [OPTIONS]
 ```
 
-### View Pipeline Status
-Shows database metrics and application counts:
+#### All Supported Options & Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--url` | | `None` | Direct application to a specific job posting URL. Bypasses database queue. |
+| `--limit` | `-l` | `1` (or `None`) | Maximum number of applications to submit in this run. |
+| `--workers` | `-w` | `1` | Number of parallel browser workers running concurrently. |
+| `--min-score` | | `8` | Minimum fit score (1–10) required to select a job from the database. |
+| `--max-score` | | `None` | Maximum fit score for job selection (useful for testing on lower-score jobs). |
+| `--max-age-days` | | `14` | Skip jobs discovered older than N days (`0` = no age filter). |
+| `--agent` | `-a` | `hermes` | Autonomous agent backend: `hermes` (recommended) or `claude`. |
+| `--model` | `-m` | `sonnet` | Model name. Examples: `deepseek-v4-pro`, `deepseek-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `moonshotai/kimi-k3`, `gemini-3.6-flash`, or `sonnet`. |
+| `--continuous` | `-c` | `False` | Run indefinitely, polling the database every 60s for new ready jobs. |
+| `--dry-run` | | `False` | Fill form and preview all agent actions with browser dry-run protection enabled. |
+| `--stop-before-submit` | | `True` | **(Default)** Fill complete form and pause on final review page for manual verification. |
+| `--auto-submit` | | `False` | Automatically click final Submit Application button without human pause. |
+| `--headless` | | `False` | Run Chrome in headless mode (invisible, no GUI window). |
+| `--doc-format` | | `docx` | Document format for resumes/cover letters: `docx` or `pdf`. |
+| `--gen` | | `False` | Generate the prompt file in `~/.applypilot/` for manual inspection without opening Chrome. |
+| `--no-hitl` | | `False` | Skip Human-in-the-Loop waits: park `needs_human` jobs and proceed immediately. Ideal for overnight runs. |
+| `--no-focus` | | `False` | Prevent Chrome windows from stealing keyboard focus (Linux/GNOME). |
+| `--fresh-sessions` | | `False` | Refresh Chrome session cookies from your personal Chrome profile before launching. |
+| `--sessions` | | `False` | List all saved ATS sessions (Workday, etc.) and cookie ages. |
+| `--clear-session` | | `None` | Clear a saved ATS session by name (e.g. `--clear-session workday`). |
+| `--mark-applied` | | `None` | Manually mark a job URL as applied in the database without running Chrome. |
+| `--mark-failed` | | `None` | Manually mark a job URL as failed in the database (provide URL). |
+| `--fail-reason` | | `None` | Optional reason string when using `--mark-failed`. |
+| `--reset-failed` | | `False` | Reset all failed jobs back to ready for retry. |
+| `--reset-category` | | `None` | Reset all jobs in a specific failure category (e.g. `--reset-category blocked_technical`). |
+
+#### Practical Examples
+
+```bash
+# 1. Apply to a specific job URL in safe review mode (stops before submit):
+applypilot apply --url "https://boards.greenhouse.io/company/jobs/123456"
+
+# 2. Test application flow without submitting (Dry Run):
+applypilot apply --url "https://jobs.lever.co/company/789" --dry-run
+
+# 3. Apply using Hermes Agent with DeepSeek V4 Pro:
+applypilot apply --agent hermes --model deepseek-v4-pro --url "https://company.jobs.personio.com/job/123"
+
+# 4. Apply using Hermes Agent with NVIDIA NIM:
+applypilot apply --agent hermes --model nvidia/nemotron-3.5-lightning-30b-a3b --url "https://job-url"
+
+# 5. Apply using Claude Code CLI (Sonnet):
+applypilot apply --agent claude --model sonnet --url "https://job-url"
+
+# 6. Run a batch of 5 jobs from the database using 2 parallel browser windows:
+applypilot apply --workers 2 --limit 5
+
+# 7. Overnight unattended batch run (no human waits, continuous queue polling):
+applypilot apply --continuous --no-hitl --auto-submit
+
+# 8. Inspect generated prompt without launching browser:
+applypilot apply --url "https://job-url" --gen
+
+# 9. List and clear saved ATS login sessions:
+applypilot apply --sessions
+applypilot apply --clear-session workday
+
+# 10. Reset retryable technical failures back to queue:
+applypilot apply --reset-category blocked_technical
+```
+
+---
+
+### 2. `applypilot status` (Pipeline Analytics)
+
+Display rich terminal tables detailing the state of your application pipeline.
+
 ```bash
 applypilot status
 ```
 
-### Manage Screening Question Knowledge Base
-ApplyPilot saves answers to screening questions so it remembers them for future jobs:
+**Information Displayed:**
+- **Pipeline Overview**: Total jobs discovered, scraped, scored by LLM, tailored, ready to apply, applied, and failed.
+- **Score Distribution**: Visual ASCII colored histogram of fit scores from 1 to 10.
+- **Pipeline Funnel by Score**: Stage-by-stage breakdown (Cover Ready, Tailored, Needs Tailor, Applied, Errors).
+- **Apply Categories**: Categorized status breakdown (`applied`, `needs_human`, `blocked_auth`, `blocked_technical`, `archived_ineligible`, `archived_expired`, `manual_only`).
+- **Jobs by Source**: Job count breakdown across platforms (Greenhouse, Lever, Personio, Workday, HackerNews, etc.).
+- **State Machine Distribution**: Current lifecycle status distribution of all database records.
+
+---
+
+### 3. `applypilot applied` (Export & View Submissions)
+
+Display a clean summary table of all submitted applications and automatically export/refresh `applied.json`.
 
 ```bash
-# List all saved question-and-answer pairs
+# View submissions and update applied.json in the project root:
+applypilot applied
+
+# Export records to a custom file location:
+applypilot applied --output ~/Desktop/my_applications.json
+```
+
+#### Supported Options
+* `-o, --output <path>`: Custom file path for the exported JSON file.
+
+---
+
+### 4. `applypilot qa` (Screening Questions Knowledge Base)
+
+Manage the persistent question-and-answer database used by agents to answer recurring ATS screening questions.
+
+```bash
+applypilot qa COMMAND [ARGS]...
+```
+
+#### Subcommands
+
+##### `applypilot qa list`
+List stored Q&A pairs with question text, answer, source, outcome status, and field type.
+```bash
+# Show the first 50 stored questions (default):
 applypilot qa list
 
-# View stats on accepted vs. rejected answers
-applypilot qa stats
-
-# Export all Q&A to a YAML file for easy editing
-applypilot qa export --output my_answers.yaml
-
-# Import Q&A pairs from a YAML file
-applypilot qa import my_answers.yaml
+# Show up to 100 questions:
+applypilot qa list --limit 100
 ```
 
-### Manage Saved Portal Credentials
-When ApplyPilot creates an account on a company career portal (e.g. Workday), it securely saves the credentials:
+##### `applypilot qa stats`
+Show knowledge base statistics: total question count, unique questions, breakdown by source (`human` vs `llm`), outcome (`accepted` vs `rejected`), and ATS platform.
+```bash
+applypilot qa stats
+```
+
+##### `applypilot qa export`
+Export all stored Q&A pairs to a clean YAML file for review or manual modification.
+```bash
+# Export to default 'qa_export.yaml':
+applypilot qa export
+
+# Export to a custom path:
+applypilot qa export --output documents/qa_backup.yaml
+```
+
+##### `applypilot qa import`
+Import Q&A pairs from a YAML file into the database.
+```bash
+applypilot qa import documents/qa_backup.yaml
+```
+
+---
+
+### 5. `applypilot creds` (Portal Credentials Manager)
+
+Manage login credentials generated or used for company career portals (Workday, SmartRecruiters, iCIMS, etc.).
 
 ```bash
-# List all saved credentials (passwords masked by default)
+applypilot creds COMMAND [ARGS]...
+```
+
+#### Subcommands
+
+##### `applypilot creds list`
+List all saved site credentials. Passwords are automatically masked by default.
+```bash
+# List credentials with masked passwords:
 applypilot creds list
 
-# List with passwords visible
+# List credentials with plaintext passwords displayed:
 applypilot creds list --show
-
-# View credentials for a specific company site
-applypilot creds show myworkdayjobs.com
-
-# Manually add credentials
-applypilot creds add company.com --email user@example.com --password SecretPassword!
 ```
+
+##### `applypilot creds show`
+Display full details for a single domain including email, password, notes, and the initial job URL.
+```bash
+applypilot creds show myworkdayjobs.com
+```
+
+##### `applypilot creds add`
+Add or update credentials for a specific company or ATS domain.
+```bash
+# Add with interactive password prompt (secure):
+applypilot creds add myworkdayjobs.com --email candidate@example.com
+
+# Add with inline parameters:
+applypilot creds add lever.co --email user@example.com --password "Secret123!" --site "Lever Portal" --notes "Created for Acme Corp"
+```
+
+##### `applypilot creds set`
+Update existing credentials for a domain without overwriting untouched fields.
+```bash
+applypilot creds set myworkdayjobs.com --email newemail@example.com
+```
+
+##### `applypilot creds import-logs`
+Scan apply logs in `~/.applypilot/logs/` for credentials created during previous autonomous sessions and import them into the database.
+```bash
+# Preview what credentials would be imported without writing:
+applypilot creds import-logs --dry-run
+
+# Import credentials automatically:
+applypilot creds import-logs --yes
+```
+
+##### `applypilot creds delete`
+Remove saved credentials for a domain from the database.
+```bash
+applypilot creds delete myworkdayjobs.com
+```
+
+---
+
+### Global Flags & Keyboard Controls
+
+#### Global CLI Flags
+- `--version`, `-V`: Display the current ApplyPilot version and exit.
+- `--help`: Display available commands, arguments, and default values.
+
+#### Live Interactive Keyboard Controls
+While an application worker is actively running in Chrome, you can interact with it directly from your terminal:
+- **`p` or `Space`**: **Pause & Take Over** — Immediately pauses the agent, leaving Chrome open so you can interact with the page manually. Press `p` or `Space` again to return control to the agent.
+- **`Ctrl + C`**: **Skip Job** — Safely skips the current job and moves on to the next application.
+- **`Ctrl + C` (twice)**: **Emergency Stop** — Immediately halts all browser workers and exits cleanly.
 
 ---
 

@@ -189,13 +189,13 @@ def apply(
             from applypilot.llm import _normalize_model_name
             model = _normalize_model_name(env_model)
         elif os.environ.get("DEEPSEEK_API_KEY"):
-            model = "deepseek-flash"
+            model = "deepseek-v4-pro"
         elif os.environ.get("NVIDIA_API_KEY"):
             model = "nvidia/nemotron-3.5-lightning-30b-a3b"
         elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
             model = "gemini-3.6-flash"
         else:
-            model = "deepseek-flash"
+            model = "deepseek-v4-pro"
 
     # Check 2: Profile exists
     if not _profile_path.exists():
