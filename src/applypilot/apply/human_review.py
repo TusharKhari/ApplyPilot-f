@@ -18,9 +18,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 
+from applypilot import config
+
 logger = logging.getLogger(__name__)
+
+
+def _get_node_env() -> tuple[dict[str, str], str]:
+    """Return environment and working directory for node subprocesses, ensuring @playwright/test can be resolved."""
+    env = dict(os.environ)
+    workspace_dir = str(config.WORKSPACE_DIR)
+    node_modules = str(config.WORKSPACE_DIR / "node_modules")
+    if "NODE_PATH" in env and env["NODE_PATH"]:
+        env["NODE_PATH"] = f"{node_modules}:{env['NODE_PATH']}"
+    else:
+        env["NODE_PATH"] = node_modules
+    return env, workspace_dir
 
 
 def _job_hash(url: str) -> str:
@@ -78,12 +93,15 @@ const {{ chromium }} = require('@playwright/test');
 }})();
 """
 
+    node_env, workspace_dir = _get_node_env()
     try:
         result = subprocess.run(
             ["node", "-e", node_script],
             timeout=15,
             capture_output=True,
             text=True,
+            cwd=workspace_dir,
+            env=node_env,
         )
         if result.returncode != 0:
             logger.warning("Banner injection failed: %s", result.stderr[:200])
@@ -409,11 +427,14 @@ const {{ chromium }} = require('@playwright/test');
   }}
 }})();
 """
+    node_env, workspace_dir = _get_node_env()
     try:
         proc = subprocess.Popen(
             ["node", "-e", watcher_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd=workspace_dir,
+            env=node_env,
         )
         logger.debug("Done watcher started (pid=%d) for hash=%s port=%d",
                      proc.pid, hash_, server_port)

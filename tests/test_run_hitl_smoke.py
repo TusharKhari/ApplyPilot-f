@@ -45,3 +45,12 @@ def test_run_hitl_returns_tuple_of_result_and_duration_and_qs():
     s = str(ann)
     assert "tuple" in s.lower() or "Tuple" in s, \
         f"_run_hitl return annotation should be a tuple, got: {s}"
+
+
+def test_human_review_node_env():
+    """Ensure node subprocess environment correctly points to workspace node_modules."""
+    from applypilot.apply.human_review import _get_node_env
+    from applypilot import config
+    env, cwd = _get_node_env()
+    assert cwd == str(config.WORKSPACE_DIR)
+    assert str(config.WORKSPACE_DIR / "node_modules") in env.get("NODE_PATH", "")
