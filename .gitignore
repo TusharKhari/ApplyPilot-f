@@ -1,10 +1,13 @@
 # User data (NEVER commit)
+/documents
 profile.json
 resume.txt
 resume.pdf
 *.env
 .env.*
 !.env.example
+
+
 
 # Runtime artifacts
 *.db
