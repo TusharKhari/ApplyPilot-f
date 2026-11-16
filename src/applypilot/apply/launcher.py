@@ -1548,9 +1548,34 @@ def _write_hermes_worker_config(worker_id: int, cdp_port: int,
     from applypilot.llm import _normalize_model_name, _infer_provider_from_model
 
     if base_dir is None:
-        base_dir = config.APPLY_WORKER_DIR / f"worker-{worker_id}"
-    worker_hermes_dir = base_dir / ".hermes"
+        worker_hermes_dir = config.HERMES_WORKER_DIR / f"worker-{worker_id}"
+    else:
+        worker_hermes_dir = base_dir / ".hermes"
     worker_hermes_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up stale locks and gateway state from previous crashed/interrupted worker runs
+    gw_state_file = worker_hermes_dir / "gateway_state.json"
+    if gw_state_file.exists():
+        try:
+            gw_data = json.loads(gw_state_file.read_text(encoding="utf-8"))
+            gw_pid = gw_data.get("pid")
+            if gw_pid and isinstance(gw_pid, int):
+                try:
+                    os.kill(gw_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        try:
+            gw_state_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    for lock_f in worker_hermes_dir.glob("*.lock"):
+        try:
+            lock_f.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     norm_model = _normalize_model_name(model)
     if not provider:
@@ -2875,6 +2900,17 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc.pid)
+        if backend == "hermes":
+            try:
+                gw_f = (config.HERMES_WORKER_DIR / f"worker-{worker_id}") / "gateway_state.json"
+                if gw_f.exists():
+                    gw_data = json.loads(gw_f.read_text(encoding="utf-8"))
+                    gw_pid = gw_data.get("pid")
+                    if gw_pid and isinstance(gw_pid, int):
+                        os.kill(gw_pid, signal.SIGKILL)
+                    gw_f.unlink(missing_ok=True)
+            except Exception:
+                pass
         if should_stop:
             try:
                 from applypilot.apply.chrome import release_dry_run_gate

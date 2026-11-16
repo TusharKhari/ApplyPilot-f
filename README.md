@@ -286,7 +286,7 @@ ApplyPilot supports two autonomous browser agent engines: **Hermes Agent** and *
 1. **No Expensive Anthropic Subscription**: You don't need a Claude Max or Claude Pro account.
 2. **Flexible & Cost-Effective LLM Backends**:
    - **DeepSeek** (`deepseek-flash`): Incredibly fast, smart, and costs fractions of a cent per application.
-   - **NVIDIA NIM** (`nvidia/nemotron-3.5-lightning-30b-a3b` or `moonshotai/kimi-k3`): Free tier credits available with top-tier reasoning.
+   - **NVIDIA NIM** (`nvidia/nemotron-3-ultra-550b-a55b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, or `moonshotai/kimi-k3`): Free tier credits available with top-tier reasoning.
    - **Google Gemini** (`gemini-3.6-flash`): Generous free tier via Google AI Studio.
 3. **100% Open Source**: Developed by Nous Research for autonomous local task execution.
 
@@ -623,7 +623,7 @@ applypilot apply [OPTIONS]
 | `--max-score` | | `None` | Maximum fit score for job selection (useful for testing on lower-score jobs). |
 | `--max-age-days` | | `14` | Skip jobs discovered older than N days (`0` = no age filter). |
 | `--agent` | `-a` | `hermes` | Autonomous agent backend: `hermes` (recommended) or `claude`. |
-| `--model` | `-m` | `sonnet` | Model name. Examples: `deepseek-v4-pro`, `deepseek-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `moonshotai/kimi-k3`, `gemini-3.6-flash`, or `sonnet`. |
+| `--model` | `-m` | `sonnet` | Model name. Examples: `nemotron-ultra`, `nvidia/nemotron-3-ultra-550b-a55b`, `deepseek-v4-pro`, `deepseek-flash`, `moonshotai/kimi-k3`, `gemini-3.6-flash`, or `sonnet`. |
 | `--continuous` | `-c` | `False` | Run indefinitely, polling the database every 60s for new ready jobs. |
 | `--dry-run` | | `False` | Fill form and preview all agent actions with browser dry-run protection enabled. |
 | `--stop-before-submit` | | `True` | **(Default)** Fill complete form and pause on final review page for manual verification. |

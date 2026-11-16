@@ -24,6 +24,7 @@ LOG_DIR = APP_DIR / "logs"
 # Chrome worker isolation
 CHROME_WORKER_DIR = APP_DIR / "chrome-workers"
 APPLY_WORKER_DIR = APP_DIR / "apply-workers"
+HERMES_WORKER_DIR = APP_DIR / "hermes-workers"
 SESSIONS_DIR = APP_DIR / "chrome-sessions"
 
 # Optional documents (profile photo, certs, ID, etc.)
@@ -110,7 +111,7 @@ def get_chrome_user_data() -> Path:
 
 def ensure_dirs():
     """Create all required directories."""
-    for d in [APP_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, SESSIONS_DIR, FILES_DIR, APPLIED_CV_DIR]:
+    for d in [APP_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, HERMES_WORKER_DIR, SESSIONS_DIR, FILES_DIR, APPLIED_CV_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 

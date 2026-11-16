@@ -126,3 +126,34 @@ class TestHermesWorkerConfig:
         env_file = hermes_dir / ".env"
         assert env_file.exists()
         assert "NVIDIA_API_KEY=nvapi-test-key" in env_file.read_text(encoding="utf-8")
+
+    def test_write_hermes_worker_config_nemotron_ultra(self, tmp_path, monkeypatch):
+        """Verify _write_hermes_worker_config properly resolves Nemotron-3 Ultra aliases."""
+        from applypilot.llm import _normalize_model_name, _infer_provider_from_model
+
+        for alias in ("nemotron-ultra", "nemotron-3-ultra", "nemotron-3-ultra-550b-a55b", "ultra-550b"):
+            norm = _normalize_model_name(alias)
+            assert norm == "nvidia/nemotron-3-ultra-550b-a55b"
+            assert _infer_provider_from_model(norm) == "nvidia"
+
+        port = 9224
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-ultra-key")
+        hermes_dir = _write_hermes_worker_config(
+            worker_id=2,
+            cdp_port=port,
+            model="nemotron-ultra",
+            base_dir=tmp_path,
+        )
+
+        config_yaml = hermes_dir / "config.yaml"
+        assert config_yaml.exists()
+        cfg = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+
+        assert cfg["model"]["default"] == "nvidia/nemotron-3-ultra-550b-a55b"
+        assert cfg["model"]["provider"] == "nvidia"
+        assert cfg["model"]["base_url"] == "https://integrate.api.nvidia.com/v1"
+
+        env_file = hermes_dir / ".env"
+        assert env_file.exists()
+        assert "NVIDIA_API_KEY=nvapi-test-ultra-key" in env_file.read_text(encoding="utf-8")

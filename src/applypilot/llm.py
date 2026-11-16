@@ -23,6 +23,11 @@ _MODEL_ALIASES: dict[str, str] = {
     "nemotron-3.5": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nemotron": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nemotron-lightning": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b",
+    "nemotron-3-ultra-550b": "nvidia/nemotron-3-ultra-550b-a55b",
+    "nemotron-3-ultra": "nvidia/nemotron-3-ultra-550b-a55b",
+    "nemotron-ultra": "nvidia/nemotron-3-ultra-550b-a55b",
+    "ultra-550b": "nvidia/nemotron-3-ultra-550b-a55b",
 }
 
 

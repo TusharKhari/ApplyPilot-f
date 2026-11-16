@@ -83,7 +83,7 @@ def apply(
     ),
     max_score: Optional[int] = typer.Option(None, "--max-score", help="Maximum fit score for job selection (useful for testing on lower-score jobs)."),
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Autonomous agent backend: hermes (default if installed) or claude."),
-    model: str = typer.Option("sonnet", "--model", "-m", help="Agent model name (nvidia/nemotron-3.5-lightning-30b-a3b, moonshotai/kimi-k3, or deepseek-flash for Hermes, sonnet for Claude)."),
+    model: str = typer.Option("sonnet", "--model", "-m", help="Agent model name (e.g. nemotron-ultra, nvidia/nemotron-3-ultra-550b-a55b, moonshotai/kimi-k3, deepseek-flash for Hermes, sonnet for Claude)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     stop_before_submit: bool = typer.Option(True, "--stop-before-submit/--auto-submit", help="Fill full form and stop before final submission for human review and submit (default: True)."),
